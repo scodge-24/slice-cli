@@ -1,11 +1,16 @@
 """Authentication middleware."""
 
+import time
+
 
 def verify_token(token: str) -> dict:
     """Verify a JWT and return claims."""
     if not token:
         raise ValueError("empty token")
-    return {"sub": "user-1", "exp": 9999999999}
+    claims = {"sub": "user-1", "exp": 9999999999}
+    if claims["exp"] < time.time():
+        raise ValueError("token expired")
+    return claims
 
 
 def require_auth(handler):

@@ -1,4 +1,5 @@
 ---
+doc_id: data-model
 title: Data Model
 tags: [models, schema]
 ---

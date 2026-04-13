@@ -1,0 +1,28 @@
+vault_root: ../docs
+docs:
+  auth-guide:
+    path: auth-guide.md
+    slices:
+    - auth-service
+    verified_at: 57e4d1a4caf7
+    tags:
+    - auth
+    - middleware
+    - security
+  api-reference:
+    path: api-reference.md
+    slices:
+    - api-handlers
+    verified_at: b6cf05a
+    tags:
+    - api
+    - routes
+    - handlers
+  data-model:
+    path: data-model.md
+    slices:
+    - data-model
+    verified_at: b6cf05a
+    tags:
+    - models
+    - schema

@@ -1,4 +1,5 @@
 ---
+doc_id: api-reference
 title: API Reference
 tags: [api, routes, handlers]
 ---

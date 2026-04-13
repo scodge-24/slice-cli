@@ -1,4 +1,5 @@
 ---
+doc_id: auth-guide
 title: Authentication Guide
 tags: [auth, middleware, security]
 ---

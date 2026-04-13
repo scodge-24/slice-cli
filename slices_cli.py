@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -615,10 +615,19 @@ def _frontmatter_doc_id(doc_path: Path) -> str | None:
 class CheckResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    hidden_warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+def _warning_category(message: str) -> str:
+    if "description drift" in message:
+        return "index_description_drift"
+    if "loc drift" in message:
+        return "index_loc_drift"
+    return "other"
 
 
 def run_check(
@@ -694,17 +703,19 @@ def run_check(
     if extra:
         result.errors.append(f"INDEX.md stale rows: {', '.join(extra)}")
 
+    for d in docs:
+        row = index_rows.get(d.slice_id)
+        if not row:
+            continue
+        if row["description"] != d.description:
+            result.hidden_warnings.append(
+                f"INDEX.md description drift for {d.slice_id}"
+            )
+        if d.loc is not None and row["loc"] != d.loc:
+            result.hidden_warnings.append(f"INDEX.md loc drift for {d.slice_id}")
+
     if strict_index:
-        for d in docs:
-            row = index_rows.get(d.slice_id)
-            if not row:
-                continue
-            if row["description"] != d.description:
-                result.warnings.append(
-                    f"INDEX.md description drift for {d.slice_id}"
-                )
-            if d.loc is not None and row["loc"] != d.loc:
-                result.warnings.append(f"INDEX.md loc drift for {d.slice_id}")
+        result.warnings.extend(result.hidden_warnings)
 
     # --- INDEX.md staleness ---
     if staleness and ctx.index_path.is_file():
@@ -945,12 +956,17 @@ def cmd_check(args: argparse.Namespace, ctx: Ctx) -> int:
         staged_coverage=not args.no_staged_coverage,
         doc_drift=not args.no_doc_drift,
     )
+    hidden = result.hidden_warnings
     if args.json:
         _emit_json({
             "ok": result.ok,
             "slice_count": len(docs),
             "errors": result.errors,
             "warnings": result.warnings,
+            "hidden_warnings": hidden,
+            "hidden_warning_count": len(hidden),
+            "hidden_warning_categories": dict(Counter(_warning_category(w) for w in hidden)),
+            "strict_index": args.strict_index,
         })
         return 0 if result.ok else 1
 
@@ -966,6 +982,8 @@ def cmd_check(args: argparse.Namespace, ctx: Ctx) -> int:
             print(f"  - {w}")
     elif result.ok:
         print("Warnings: none")
+    if hidden and not args.strict_index:
+        print(f"({len(hidden)} index drift warnings hidden — use --strict-index to show)")
     return 0 if result.ok else 1
 
 
@@ -1298,10 +1316,15 @@ def _add_selector(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("selector", help="Slice ID or doc stem.")
 
 
+class RichHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Preserve multi-line help text and examples."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="slice",
         description="Navigate codebase slice documents.",
+        formatter_class=RichHelpFormatter,
     )
     p.add_argument("--repo", metavar="DIR", help="Override repo root.")
     p.add_argument("--slices-dir", metavar="DIR", help="Override slices directory.")

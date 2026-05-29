@@ -6,6 +6,7 @@ pub mod commands;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod git_backend;
 pub mod index;
 pub mod init;
 pub mod manifest;

@@ -179,6 +179,34 @@ docs:
     temp
 }
 
+fn write_auth_slice_with_verification(repo: &Path, verification: &str, abstractions: &[&str]) {
+    let abstractions_yaml = if abstractions.is_empty() {
+        "abstractions: []\n".to_owned()
+    } else {
+        let items = abstractions
+            .iter()
+            .map(|item| format!("  - \"{item}\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("abstractions:\n{items}\n")
+    };
+    std::fs::write(
+        repo.join("slices/auth-service.md"),
+        format!(
+            "---\nslice_id: auth-service\ndescription: Authentication\nfiles:\n  - src/auth/middleware.py\n  - src/auth/sessions.py\n{abstractions_yaml}dependencies: []\n---\n\n## Verification\n\n{verification}\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn add_second_owner(repo: &Path) {
+    std::fs::write(
+        repo.join("slices/auth-extra.md"),
+        "---\nslice_id: auth-extra\ndescription: Extra auth view\nloc: 5\nfiles:\n  - src/auth/middleware.py\ndependencies: []\n---\nExtra slice body.\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn read_only_json_matches_python() {
     for args in [
@@ -215,7 +243,27 @@ fn affected_docs_matches_python_for_legacy_manifest_shape() {
 }
 
 #[test]
-fn subprocess_and_remaining_delegated_commands_match_python() {
+fn read_only_human_outputs_match_python() {
+    for args in [
+        &["list"][..],
+        &["show", "auth-service"],
+        &["show", "auth-service", "--body"],
+        &["show", "auth-service", "--system"],
+        &["show", "auth-service", "--call-stacks"],
+        &["show", "auth-service", "--verification"],
+        &["files", "auth-service"],
+        &["deps", "api-handlers"],
+        &["deps", "auth-service", "--reverse"],
+        &["for", "src/auth/middleware.py"],
+        &["find", "auth"],
+        &["docs", "auth-service"],
+    ] {
+        assert_eq!(run_rust_raw(args), run_python_raw(args), "args: {args:?}");
+    }
+}
+
+#[test]
+fn subprocess_commands_and_init_dry_runs_match_python() {
     for args in [
         &["sync-index", "--stdout"][..],
         &["grep", "auth-service", "verify_token"],
@@ -324,6 +372,190 @@ docs:
     assert_eq!(
         run_rust_for_repo(repo, &args),
         run_python_for_repo(repo, &args)
+    );
+}
+
+#[test]
+fn native_check_json_matches_python_for_verification_links() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::create_dir(repo.join("tests")).unwrap();
+    std::fs::write(repo.join("tests/test_auth.py"), "def test_valid(): pass\n").unwrap();
+
+    write_auth_slice_with_verification(
+        repo,
+        "- `verify_token` <- tests/test_auth.py::test_valid\n- upstream: src/auth/middleware.py",
+        &[],
+    );
+    let args = ["check", "--json", "--no-staleness", "--no-doc-drift"];
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+
+    write_auth_slice_with_verification(
+        repo,
+        "- `verify_token` <- tests/test_missing.py::test_x\n- upstream: design/missing.md",
+        &[],
+    );
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+}
+
+#[test]
+fn native_check_json_matches_python_for_required_verification() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::create_dir(repo.join("tests")).unwrap();
+    std::fs::write(repo.join("tests/test_auth.py"), "def test_valid(): pass\n").unwrap();
+    write_auth_slice_with_verification(
+        repo,
+        "- `verify_token` <- tests/test_auth.py::test_valid",
+        &[
+            "verify_token - checks JWT",
+            "create_session - makes a session",
+        ],
+    );
+
+    let args = [
+        "check",
+        "--json",
+        "--no-staleness",
+        "--no-doc-drift",
+        "--require-verification",
+    ];
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+}
+
+#[test]
+fn native_check_json_matches_python_for_index_and_staged_coverage() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    assert_eq!(run_rust_raw_for_repo(repo, &["sync-index"]).0, 0);
+
+    std::fs::write(
+        repo.join("src/auth/middleware.py"),
+        "def verify_token(): return False\n",
+    )
+    .unwrap();
+    let stale_args = ["check", "--json", "--no-doc-drift"];
+    assert_eq!(
+        run_rust_for_repo(repo, &stale_args),
+        run_python_for_repo(repo, &stale_args)
+    );
+
+    std::fs::write(repo.join("src/unowned.py"), "print('unowned')\n").unwrap();
+    run_git(repo, &["add", "src/unowned.py"]);
+    let staged_args = ["check", "--json", "--no-staleness", "--no-doc-drift"];
+    assert_eq!(
+        run_rust_for_repo(repo, &staged_args),
+        run_python_for_repo(repo, &staged_args)
+    );
+}
+
+#[test]
+fn native_check_json_matches_python_for_strict_index_and_no_manifest() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    assert_eq!(run_rust_raw_for_repo(repo, &["sync-index"]).0, 0);
+    let slice_path = repo.join("slices/auth-service.md");
+    let updated = std::fs::read_to_string(&slice_path)
+        .unwrap()
+        .replace("description: Authentication", "description: Auth changed");
+    std::fs::write(&slice_path, updated).unwrap();
+
+    for args in [
+        &["check", "--json", "--no-staleness"][..],
+        &["check", "--json", "--no-staleness", "--strict-index"],
+    ] {
+        assert_eq!(
+            run_rust_for_repo(repo, args),
+            run_python_for_repo(repo, args),
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn native_check_json_matches_python_for_doc_frontmatter_and_drift_toggles() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::write(
+        repo.join("docs/auth-guide.md"),
+        "---\ndoc_id: wrong-id\n---\n# Auth Guide\n",
+    )
+    .unwrap();
+    let args = ["check", "--json", "--no-staleness"];
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+
+    std::fs::write(
+        repo.join("docs/auth-guide.md"),
+        "---\ndoc_id: auth-guide\n---\n# Auth\n",
+    )
+    .unwrap();
+    assert_eq!(run_rust_raw_for_repo(repo, &["stamp", "auth-guide"]).0, 0);
+    std::fs::write(
+        repo.join("src/auth/middleware.py"),
+        "def verify_token():\n    return 42\n",
+    )
+    .unwrap();
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-m", "edit after stamp"]);
+
+    for args in [
+        &["check", "--json", "--no-staleness"][..],
+        &["check", "--json", "--no-staleness", "--no-doc-drift"],
+    ] {
+        assert_eq!(
+            run_rust_for_repo(repo, args),
+            run_python_for_repo(repo, args),
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn context_config_and_ambiguity_match_python() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    add_second_owner(repo);
+
+    assert_eq!(
+        run_rust_raw_for_repo(repo, &["context", "src/auth/middleware.py"]),
+        run_python_raw_for_repo(repo, &["context", "src/auth/middleware.py"])
+    );
+
+    std::fs::write(
+        repo.join("slices/config.yaml"),
+        "context:\n  ambiguity: best_effort\n",
+    )
+    .unwrap();
+    assert_eq!(
+        run_rust_for_repo(repo, &["context", "src/auth/middleware.py", "--json"]),
+        run_python_for_repo(repo, &["context", "src/auth/middleware.py", "--json"])
+    );
+    assert_eq!(
+        run_rust_raw_for_repo(repo, &["context", "src/auth/middleware.py", "--strict"]),
+        run_python_raw_for_repo(repo, &["context", "src/auth/middleware.py", "--strict"])
+    );
+
+    std::fs::write(
+        repo.join("slices/config.yaml"),
+        "context:\n  ambiguity: loose\n",
+    )
+    .unwrap();
+    assert_eq!(
+        run_rust_raw_for_repo(repo, &["context", "auth-service"]),
+        run_python_raw_for_repo(repo, &["context", "auth-service"])
     );
 }
 

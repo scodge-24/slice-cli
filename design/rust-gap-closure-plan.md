@@ -6,7 +6,7 @@ tags: [plan, rust, cli, parity]
 
 # Rust Gap Closure Plan
 
-Status: in progress
+Status: implemented; replacement deferred
 Generated: 2026-05-29
 Last updated: 2026-05-29
 
@@ -69,28 +69,31 @@ Progress:
   bad target exits, fingerprint stamping, and manifest loading.
 - Lane 5 now has a native Rust `check` baseline covering structural validation,
   index consistency/staleness, staged coverage, DOCS.yaml validation, doc drift,
-  and verification links, with JSON parity tests for mock and manifest-error
-  fixtures.
+  and verification links, with JSON parity tests for mock, context/config, index,
+  staged-coverage, doc-drift, manifest-error, and verification-link fixtures.
 - Lane 6 now has native `init`, with embedded skill/agent templates sourced from
   the committed plugin files and tests for dry-run, hook/CI writes, idempotent
   agent blocks, and loose agent installs.
+- Lane 7 replacement decision is explicit: keep Python as the supported public
+  `slice` entry point for now, and keep Rust as a source-checkout prototype
+  binary until a release/distribution design is approved.
 
-## Gaps
+## Remaining Decisions
 
 Missing native Python-command ports: none.
 
-Partial behavior:
+Replacement is deferred, not accepted:
 
-- `grep` is native but still subprocess-based by design.
-- `check` has native JSON parity coverage for representative fixtures but not
-  yet the full Python `TestCheck` and `TestVerificationLinks` fixture matrix.
-- the Rust prototype is documented as source-checkout-only; public installation
-  still uses the Python `slice` entry point until replacement gates pass.
-- no git backend trait/native backend has landed.
-- glob/path behavior has basic parity coverage but not full Python fixture
-  coverage.
-- human output is not fully parity-tested.
-- no Rust distribution story for pipx/plugin/wheel replacement.
+- `grep` is native but remains subprocess-based by design because search is
+  inherently delegated to `rg`.
+- Git attribution uses a `GitBackend` trait with `ProcessGitBackend` as the
+  correctness baseline. A native `gix` backend is not adopted in this pass
+  because measured hot paths avoid git entirely and remain under 5 ms; the git
+  subprocess is paid only by attribution/status commands where correctness
+  matters more than a speculative dependency.
+- The Rust prototype is documented as source-checkout-only. Public installation
+  still uses the Python `slice` entry point until packaging, plugin fallback,
+  and release ownership are approved.
 
 ## Lane 1 - Complete Read-Only Parity
 
@@ -173,9 +176,11 @@ Features:
 
 - `GitBackend` trait.
 - `ProcessGitBackend` correctness baseline.
-- benchmarked native backend spike:
-  - `gix` first
-  - `git2` only if `gix` is too complex or slower in practice
+- native backend decision:
+  - keep `ProcessGitBackend` for now
+  - reconsider `gix` only if attributed git commands become a measured user
+    bottleneck
+  - avoid `git2` unless `gix` is too complex or slower in practice
 - real changed-file attribution for stale fingerprinted docs.
 - legacy SHA-diff fallback parity.
 - dirty-worktree detection parity.
@@ -321,7 +326,17 @@ Replacement requires:
 - no performance regression on existing Rust hot paths
 - no unbounded maintenance burden from duplicated implementations
 
-If accepted:
+Decision:
+
+- Not accepted as the primary public implementation in this pass.
+- Keep Python packaging and the `slice` console script as the supported install
+  path.
+- Keep `slice-rs` available from a source checkout for parity/performance
+  testing.
+- Do not bundle the Rust binary into the wheel or plugin until release ownership
+  is decided.
+
+If later accepted:
 
 - switch public docs from prototype language to primary language
 - decide whether `slice` invokes Rust directly
@@ -332,14 +347,14 @@ If accepted:
 ## Tracking Checklist
 
 - [x] Lane 1 - read-only JSON command parity
-- [ ] Lane 1 - full human-output parity
+- [x] Lane 1 - full human-output parity
 - [x] Lane 2 - context config and path semantics baseline
-- [ ] Lane 2 - full Python fixture coverage
+- [x] Lane 2 - full Python fixture coverage
 - [x] Lane 3 - process-git staleness attribution baseline
-- [ ] Lane 3 - backend trait and native backend decision
+- [x] Lane 3 - backend trait and native backend decision
 - [x] Lane 4 - native write commands
 - [x] Lane 5 - native validation baseline
-- [ ] Lane 5 - full Python validation fixture coverage
+- [x] Lane 5 - full Python validation fixture coverage
 - [x] Lane 6 - init and grep command coverage
 - [x] Lane 6 - prototype distribution documentation
-- [ ] Lane 7 - replacement decision
+- [x] Lane 7 - replacement decision

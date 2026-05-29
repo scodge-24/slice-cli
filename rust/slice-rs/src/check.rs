@@ -15,10 +15,10 @@ use crate::models::SliceDoc;
 use crate::paths::{expand_literal_or_existing, matches_path};
 use crate::slices::load_slice_docs;
 
-const SOURCE_EXTENSIONS: [&str; 28] = [
+const SOURCE_EXTENSIONS: [&str; 29] = [
     ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".rb", ".java", ".kt", ".cs", ".c", ".cpp",
     ".h", ".hpp", ".swift", ".vue", ".svelte", ".ex", ".exs", ".erl", ".zig", ".lua", ".php",
-    ".scala", ".clj", ".hs", ".ml",
+    ".scala", ".clj", ".hs", ".ml", ".mli",
 ];
 
 #[expect(clippy::struct_excessive_bools, reason = "mirrors CLI check flags")]

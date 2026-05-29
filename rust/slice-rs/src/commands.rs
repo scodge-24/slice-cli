@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{Ambiguity, load_ambiguity};
 use crate::context::Context;
+use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
 use crate::manifest::{load_doc_manifest, save_doc_manifest};
 use crate::models::{
     AffectedDoc, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch, ListRow,
@@ -114,6 +115,7 @@ pub fn show(ctx: &Context, selector: &str, mode: ShowMode, json: bool) -> Result
         print_list("dependencies", &doc.dependencies);
         print_list("abstractions", &doc.abstractions);
         print_list("exclusions", &doc.exclusions);
+        print_tracked_docs("docs", &linked_docs);
     }
     Ok(0)
 }
@@ -704,43 +706,6 @@ pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: boo
     Ok(0)
 }
 
-pub fn python_fallback(ctx: &Context, command_args: &[String]) -> Result<i32> {
-    let mut command = Command::new("python3");
-    command
-        .args(["-m", "slice_cli", "--repo"])
-        .arg(ctx.repo_root())
-        .args(["--slices-dir"])
-        .arg(ctx.slices_dir())
-        .args(command_args);
-    if let Some(project_root) = slice_cli_project_root() {
-        let python_path = std::env::var_os("PYTHONPATH").map_or_else(
-            || project_root.to_string_lossy().into_owned(),
-            |existing| {
-                format!(
-                    "{}:{}",
-                    project_root.to_string_lossy(),
-                    existing.to_string_lossy()
-                )
-            },
-        );
-        command.env("PYTHONPATH", python_path);
-    }
-    match command.status() {
-        Ok(status) => Ok(status.code().unwrap_or(1)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("python3 is required for this delegated prototype command");
-            Ok(2)
-        }
-        Err(err) => Err(Error::Io(err)),
-    }
-}
-
-fn slice_cli_project_root() -> Option<&'static Path> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest_dir.parent()?.parent()?;
-    root.join("slice_cli").is_dir().then_some(root)
-}
-
 fn stamp_targets(
     ctx: &Context,
     docs: &[TrackedDoc],
@@ -974,7 +939,8 @@ pub fn stale_docs_for(
                     verified_at: doc.verified_at.clone(),
                 });
             } else {
-                match git_changed_files(ctx, &tracked_files, &doc.verified_at) {
+                let backend = ProcessGitBackend;
+                match backend.changed_files(ctx, &tracked_files, &doc.verified_at) {
                     GitChanges::Changed(changed) if !changed.is_empty() => {
                         stale.push(StaleDoc {
                             affected_slices: affected_slices(&changed, &linked_slices, &by_id)
@@ -1004,7 +970,8 @@ pub fn stale_docs_for(
             let changed = if matches!(mode, StalenessMode::Fast) {
                 concrete
             } else {
-                match git_changed_files(ctx, &tracked_files, &doc.verified_at) {
+                let backend = ProcessGitBackend;
+                match backend.changed_files(ctx, &tracked_files, &doc.verified_at) {
                     GitChanges::Changed(changed) if !changed.is_empty() => changed,
                     GitChanges::Changed(_) | GitChanges::BadRevision => concrete,
                 }
@@ -1026,56 +993,6 @@ pub fn stale_docs_for(
 pub enum StalenessMode {
     Fast,
     Attributed,
-}
-
-enum GitChanges {
-    Changed(Vec<String>),
-    BadRevision,
-}
-
-fn git_changed_files(ctx: &Context, files: &[String], verified_at: &str) -> GitChanges {
-    let mut changed = FxHashSet::default();
-    if !verified_at.is_empty() {
-        let mut command = Command::new("git");
-        command
-            .args(["diff", "--name-only", &format!("{verified_at}..HEAD"), "--"])
-            .args(files)
-            .current_dir(ctx.repo_root());
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                changed.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(ToOwned::to_owned),
-                );
-            }
-            Ok(_) => return GitChanges::BadRevision,
-            Err(_) => return GitChanges::Changed(Vec::new()),
-        }
-    }
-
-    let mut command = Command::new("git");
-    command
-        .args(["diff", "--name-only", "HEAD", "--"])
-        .args(files)
-        .current_dir(ctx.repo_root());
-    if let Ok(output) = command.output()
-        && output.status.success()
-    {
-        changed.extend(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(ToOwned::to_owned),
-        );
-    }
-
-    let mut ordered = changed.into_iter().collect::<Vec<_>>();
-    ordered.sort();
-    GitChanges::Changed(ordered)
 }
 
 fn affected_slices(
@@ -1357,4 +1274,30 @@ fn print_list(label: &str, values: &[String]) {
             println!("  - {value}");
         }
     }
+}
+
+fn print_tracked_docs(label: &str, values: &[&TrackedDoc]) {
+    if values.is_empty() {
+        println!("{label}: (none)");
+    } else {
+        println!("{label}:");
+        for value in values {
+            println!(
+                "  - {{'doc_id': '{}', 'path': '{}', 'verified_at': '{}', 'tags': {}}}",
+                value.doc_id,
+                value.path,
+                value.verified_at,
+                python_list_repr(&value.tags)
+            );
+        }
+    }
+}
+
+fn python_list_repr(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{items}]")
 }

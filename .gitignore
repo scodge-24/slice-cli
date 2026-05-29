@@ -6,3 +6,5 @@ trash/
 .coverage
 htmlcov/
 .gstack/
+target/
+rust/slice-rs/target/

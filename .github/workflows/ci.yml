@@ -52,3 +52,24 @@ jobs:
       - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo list --json
       - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo init --agent --dry-run
       - run: python -m slice_cli --repo examples/mock-repo list --json
+
+  rust-prototype:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/slice-rs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: cargo fmt --check --manifest-path rust/slice-rs/Cargo.toml
+      - run: cargo clippy --manifest-path rust/slice-rs/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path rust/slice-rs/Cargo.toml
+      - run: cargo build --release --manifest-path rust/slice-rs/Cargo.toml
+      - run: rust/slice-rs/target/release/slice-rs --repo examples/mock-repo list --json

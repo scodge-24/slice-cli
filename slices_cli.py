@@ -1717,6 +1717,8 @@ describe, via `slice` (slice-cli) and `slices/DOCS.yaml`.
   docs may need updating. Update stale docs, then `slice stamp <doc-id>` to mark
   them verified.
 - `slice stale-docs` lists everything currently stale (exit 1 if any are stale).
+- If `slices/` is missing or out of date, run `/slice-codebase` to (re)generate
+  slice definitions.
 """
 
 _HOOK_SCRIPT = """\

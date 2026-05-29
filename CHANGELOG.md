@@ -25,6 +25,15 @@ First public release.
   for CLAUDE.md/AGENTS.md, optional `--hook` and `--ci`).
 - `slices/config.yaml` with `context.ambiguity: strict | best_effort`.
 
+### Slice generation (agent side)
+- Bundles the `slice-codebase` skill and `codebase-slicer` agent that scan a
+  repo and write slice definitions (`/slice-codebase`), no longer tied to a
+  private plugin.
+- The repo is an installable Claude Code plugin:
+  `claude plugin marketplace add scodge-24/slice-cli`.
+- `slice init --agent [--global]` installs the skill + agent into `.claude/`
+  (or `~/.claude/`) for the pip-only path.
+
 ### Robustness
 - Malformed YAML, a missing `git`, and out-of-repo paths now exit 2 with a clear
   message instead of a traceback.

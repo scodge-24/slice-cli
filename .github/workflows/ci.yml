@@ -32,4 +32,23 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: pyright slices_cli.py
+      - run: pyright slice_cli test_slices_cli.py
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Configure git (smoke commands inspect repo state)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+      - run: pip install build
+      - run: python -m build
+      - run: python -m venv /tmp/slice-wheel-smoke
+      - run: /tmp/slice-wheel-smoke/bin/pip install dist/*.whl
+      - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo list --json
+      - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo init --agent --dry-run
+      - run: python -m slice_cli --repo examples/mock-repo list --json

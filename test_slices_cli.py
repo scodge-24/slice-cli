@@ -1,4 +1,4 @@
-"""Tests for slices_cli.py — manifest-based doc tracking."""
+"""Tests for slice_cli — manifest-based doc tracking."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-import slices_cli as cli
+import slice_cli as cli
+from slice_cli import commands as commands_mod
+from slice_cli import drift, fingerprint, init as init_mod, paths, render
 
 
 # ---------------------------------------------------------------------------
@@ -189,13 +191,13 @@ class TestManifestLoading:
 
     def test_reverse_lookup(self, ctx: cli.Ctx):
         manifest = cli.load_doc_manifest(ctx)
-        auth_docs = cli._docs_for_slice(manifest.docs, "auth-service")
+        auth_docs = drift._docs_for_slice(manifest.docs, "auth-service")
         assert len(auth_docs) == 1
         assert auth_docs[0].doc_id == "auth-guide"
 
     def test_reverse_lookup_no_match(self, ctx: cli.Ctx):
         manifest = cli.load_doc_manifest(ctx)
-        assert cli._docs_for_slice(manifest.docs, "nonexistent") == []
+        assert drift._docs_for_slice(manifest.docs, "nonexistent") == []
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +309,7 @@ class TestDocDrift:
 
 class TestGlobExpansion:
     def test_glob_expands_to_matching_files(self, repo: Path):
-        names = {p.name for p in cli._expand_glob("src/auth/*.py", repo)}
+        names = {p.name for p in paths._expand_glob("src/auth/*.py", repo)}
         assert names == {"middleware.py", "sessions.py"}
 
     def test_literal_filename_with_metachars_resolves(self, repo: Path):
@@ -317,17 +319,17 @@ class TestGlobExpansion:
         route.mkdir(parents=True)
         target = route / "page.tsx"
         target.write_text("export default Page\n")
-        assert cli._expand_glob("app/[id]/page.tsx", repo) == [target.resolve()]
+        assert paths._expand_glob("app/[id]/page.tsx", repo) == [target.resolve()]
 
     def test_metachar_file_edits_are_fingerprinted(self, repo: Path, ctx: cli.Ctx):
         route = repo / "app" / "[id]"
         route.mkdir(parents=True)
         (route / "page.tsx").write_text("v1\n")
-        fp1 = cli._content_fingerprint(
-            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        fp1 = fingerprint._content_fingerprint(
+            sorted(paths._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
         (route / "page.tsx").write_text("v2\n")
-        fp2 = cli._content_fingerprint(
-            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        fp2 = fingerprint._content_fingerprint(
+            sorted(paths._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
         assert fp1 != fp2  # the edit is visible to staleness tracking
 
 
@@ -524,11 +526,11 @@ class TestCheck:
 
     def test_source_fingerprint_tracks_dirty_slice_sources(self, repo: Path, ctx: cli.Ctx):
         docs = cli.load_slice_docs(ctx)
-        clean = ctx.source_fingerprint(docs)
+        clean = fingerprint.source_fingerprint(docs, ctx)
         assert len(clean) == 64  # content hash, clean or dirty
 
         (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
-        dirty = ctx.source_fingerprint(docs)
+        dirty = fingerprint.source_fingerprint(docs, ctx)
         assert dirty != clean
         assert len(dirty) == 64
 
@@ -1049,9 +1051,9 @@ class TestInit:
         # The plugin reads the on-disk files; `slice init --agent` writes the
         # embedded constants. They must stay byte-identical or the two install
         # channels drift.
-        root = Path(cli.__file__).resolve().parent
-        assert cli._SLICE_CODEBASE_SKILL == (root / "skills" / "slice-codebase" / "SKILL.md").read_text()
-        assert cli._CODEBASE_SLICER_AGENT == (root / "agents" / "codebase-slicer.md").read_text()
+        root = Path(init_mod.__file__).resolve().parent.parent
+        assert init_mod._SLICE_CODEBASE_SKILL == (root / "skills" / "slice-codebase" / "SKILL.md").read_text()
+        assert init_mod._CODEBASE_SLICER_AGENT == (root / "agents" / "codebase-slicer.md").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -1126,7 +1128,7 @@ class TestCommandCoverage:
         assert rc == 0
 
     def test_grep_without_rg_is_graceful(self, repo: Path, monkeypatch, capsys):
-        monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+        monkeypatch.setattr(commands_mod.shutil, "which", lambda _: None)
         rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
         assert rc == 2
         assert "rg is required" in capsys.readouterr().err
@@ -1184,9 +1186,9 @@ class TestVerificationLinks:
         assert cli.parse_verification(body) == ([], [])
 
     def test_normalize_abstraction_strips_description(self):
-        assert cli._normalize_abstraction("`verify_token` — checks JWT") == "verify_token"
-        assert cli._normalize_abstraction("create_session - makes a session") == "create_session"
-        assert cli._normalize_abstraction("SessionStore") == "SessionStore"
+        assert render._normalize_abstraction("`verify_token` — checks JWT") == "verify_token"
+        assert render._normalize_abstraction("create_session - makes a session") == "create_session"
+        assert render._normalize_abstraction("SessionStore") == "SessionStore"
 
     def test_valid_refs_pass(self, repo: Path, ctx: cli.Ctx):
         (repo / "tests").mkdir()

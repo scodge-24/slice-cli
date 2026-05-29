@@ -55,3 +55,6 @@ First public release.
 ### Distribution
 - Installable via `pip`/`pipx` as the `slice` console script. PyPI publish is
   planned but not yet done.
+- BREAKING: the Python module is now the `slice_cli` package. The legacy
+  `slices_cli` module import and direct root-script execution path are removed;
+  use the `slice` console script or `python -m slice_cli`.

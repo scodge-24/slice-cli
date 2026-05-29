@@ -20,6 +20,12 @@ pip install -e .
 
 Requires Python 3.10+ and `git` on PATH.
 
+From a source checkout, you can also run the CLI without installing it:
+
+```bash
+python -m slice_cli --repo examples/mock-repo list --json
+```
+
 ## 60-second tour
 
 This repo ships a self-contained demo under `examples/mock-repo/`. Point `slice`

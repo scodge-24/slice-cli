@@ -1,6 +1,6 @@
 # Contributing to slice-cli
 
-Thanks for your interest. slice-cli is a single-file Python CLI; contributions
+Thanks for your interest. slice-cli is a small Python package; contributions
 that keep it simple and well-tested are very welcome.
 
 ## Dev setup
@@ -13,13 +13,13 @@ pytest          # the suite builds throwaway git repos in tmp dirs (~10s)
 
 ## Conventions
 
-- **Keep it single-file.** The CLI lives in `slices_cli.py`. Don't split it into
-  a package without a strong reason.
+- **Keep changes focused.** The CLI lives in the `slice_cli/` package; put code
+  in the module that owns the concern instead of growing `cli.py`.
 - **`slices_cli_upstream.py` is a read-only reference.** Do not edit it. Compare
   against it to understand divergence from the upstream implementation. It is not
   shipped in the published package.
 - **Tests are not optional.** Every code path should have coverage; the suite
-  uses temp git repos via the `repo` fixture (see `test_slices_cli.py`). Prefer
+  uses temp git repos via the `repo` fixture. Prefer
   asserting on `--json` output over matching human text.
 - **Types stay strict.** The code is fully type-hinted; `pyright` runs in CI.
 - **Staleness is fingerprint-anchored.** `slice stamp` records a content hash of
@@ -31,10 +31,28 @@ pytest          # the suite builds throwaway git repos in tmp dirs (~10s)
 
 ```bash
 pytest
-pyright slices_cli.py    # if installed
+pyright    # if installed
 ```
 
 Run these green, describe what changed and why, and link any related issue.
+
+## Module map
+
+| I want to change... | Look in |
+|---------------------|---------|
+| repo / git / path discovery | `slice_cli/context.py` |
+| path normalization helpers | `slice_cli/paths.py` |
+| content + source fingerprinting | `slice_cli/fingerprint.py` |
+| index parse/generate | `slice_cli/index.py` |
+| load/save slices + manifest | `slice_cli/persistence.py` |
+| doc drift detection | `slice_cli/drift.py` |
+| validation (`slice check`) | `slice_cli/check.py` |
+| command handlers (`cmd_*`) | `slice_cli/commands.py` |
+| human + JSON rendering | `slice_cli/render.py` |
+| `slice docs bootstrap` | `slice_cli/bootstrap.py` |
+| `slice init` + templates | `slice_cli/init.py` |
+| argparse wiring + `main()` | `slice_cli/cli.py` |
+| `python -m slice_cli` entry | `slice_cli/__main__.py` |
 
 ## Filing issues
 

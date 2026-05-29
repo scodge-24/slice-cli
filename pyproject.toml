@@ -18,15 +18,13 @@ Homepage = "https://github.com/scodge-24/slice-cli"
 Source = "https://github.com/scodge-24/slice-cli"
 
 [project.scripts]
-slice = "slices_cli:main"
+slice = "slice_cli.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pyright>=1.1"]
+dev = ["build>=1", "pytest>=7", "pyright>=1.1"]
 
-# Single-file module — ships slices_cli.py only. The upstream reference
-# (slices_cli_upstream.py) and tests are intentionally NOT packaged.
 [tool.setuptools]
-py-modules = ["slices_cli"]
+packages = ["slice_cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]
@@ -36,10 +34,10 @@ testpaths = ["."]
 addopts = "-q --ignore=examples"
 
 [tool.coverage.run]
-source = ["slices_cli"]
+source = ["slice_cli"]
 omit = ["test_*.py", "slices_cli_upstream.py"]
 
 [tool.pyright]
-include = ["slices_cli.py"]
+include = ["slice_cli", "test_slices_cli.py"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"

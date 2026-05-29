@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slice-cli"
+version = "0.1.0"
+description = "Navigate codebase slice documents and track whether design docs are stale relative to the code they describe."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Scott Hodge" }]
+keywords = ["documentation", "staleness", "codebase", "agents", "cli"]
+dependencies = ["pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/scodge/slice-cli"
+Source = "https://github.com/scodge/slice-cli"
+
+[project.scripts]
+slice = "slices_cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pyright>=1.1"]
+
+# Single-file module — ships slices_cli.py only. The upstream reference
+# (slices_cli_upstream.py) and tests are intentionally NOT packaged.
+[tool.setuptools]
+py-modules = ["slices_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["slices_cli"]
+omit = ["test_*.py", "slices_cli_upstream.py"]
+
+[tool.pyright]
+include = ["slices_cli.py"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"

@@ -59,7 +59,7 @@ Response:
 
 Exit code: 0 if no affected docs are stale, 1 if any affected doc is stale.
 
-**Agent action**: Read stale docs, decide if they need updating, and update the content when needed. Commit the source/doc changes before stamping; `slice stamp` records the current `HEAD` SHA and refuses to stamp docs whose tracked source files are still uncommitted.
+**Agent action**: Read stale docs, decide if they need updating, and update the content when needed. Then `slice stamp` records a content fingerprint of the doc's tracked source files (plus the `HEAD` short-SHA as a human-readable note). Stamping works whether or not the changes are committed — the fingerprint captures the exact content you verified, so it stays correct across commits and rebases.
 
 ### 2. "What docs cover this slice?"
 

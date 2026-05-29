@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -101,20 +101,14 @@ class Ctx:
         dirty = dirty_slice_source_paths(docs, self)
         if not dirty:
             return head
-
+        # Dirty worktree: blend HEAD with a content hash of the dirty sources so
+        # INDEX staleness reflects uncommitted edits. Shares the hashing
+        # primitive with doc-staleness fingerprints (_content_fingerprint).
         digest = hashlib.sha256()
         digest.update(b"slice-source-v1\0")
         digest.update(head.encode())
         digest.update(b"\0")
-        for rel_path in sorted(dirty):
-            digest.update(rel_path.encode())
-            digest.update(b"\0")
-            path = self.repo_root / rel_path
-            if path.exists() and path.is_file():
-                digest.update(path.read_bytes())
-            else:
-                digest.update(b"<deleted>")
-            digest.update(b"\0")
+        digest.update(_content_fingerprint(dirty, self.repo_root).encode())
         return digest.hexdigest()
 
     def rel(self, path: Path) -> str:
@@ -148,10 +142,11 @@ class TrackedDoc:
     doc_id: str          # manifest key — stable identifier from doc frontmatter
     path: str            # relative to vault_root
     slices: tuple[str, ...]
-    verified_at: str
+    verified_at: str     # HEAD short-SHA at stamp time — human-readable note only
     tags: tuple[str, ...]
     include: tuple[str, ...]   # optional: narrow to specific files within slices
     exclude: tuple[str, ...]   # optional: exclude specific files/globs
+    fingerprint: str = ""      # content hash of tracked files at stamp time (staleness anchor)
 
 
 @dataclass
@@ -257,6 +252,7 @@ def load_doc_manifest(ctx: Ctx) -> DocManifest:
             tags=_string_list(entry.get("tags")),
             include=_string_list(entry.get("include")),
             exclude=_string_list(entry.get("exclude")),
+            fingerprint=str(entry.get("fingerprint", "")).strip(),
         ))
     return DocManifest(vault_root_raw=vault_root_raw, docs=tracked)
 
@@ -270,6 +266,8 @@ def _save_doc_manifest(manifest: DocManifest, ctx: Ctx) -> None:
             "slices": list(td.slices),
             "verified_at": td.verified_at,
         }
+        if td.fingerprint:
+            entry["fingerprint"] = td.fingerprint
         if td.tags:
             entry["tags"] = list(td.tags)
         if td.include:
@@ -608,6 +606,47 @@ def _resolve_tracked_files(
     ]
 
 
+def _resolve_tracked_concrete_files(
+    td: TrackedDoc,
+    by_id: dict[str, SliceDoc],
+    ctx: Ctx,
+) -> list[str]:
+    """Resolve a TrackedDoc to concrete repo-relative files, expanding globs.
+
+    This is the deterministic input to a doc's content fingerprint, so `stamp`
+    and `check` agree on exactly which files back a verification.
+    """
+    out: set[str] = set()
+    for raw in _resolve_tracked_files(td, by_id):
+        if any(c in raw for c in ("*", "?", "[")):
+            for p in _expand_glob(raw, ctx.repo_root):
+                if p.is_file():
+                    out.add(ctx.rel(p))
+        else:
+            out.add(_normalize_repo_path(raw, ctx))
+    return sorted(out)
+
+
+def _content_fingerprint(rel_paths: list[str], repo_root: Path) -> str:
+    """Deterministic, order-independent SHA-256 of the given files' contents.
+
+    Missing files hash as a stable sentinel so deletions still change the
+    digest. Shared by INDEX source fingerprinting and doc-staleness anchoring.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"slice-content-v1\0")
+    for rel in sorted(set(rel_paths)):
+        digest.update(rel.encode())
+        digest.update(b"\0")
+        path = repo_root / rel
+        if path.is_file():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"<deleted>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _resolve_track_to_slice_ids(
     track: str, slices: list[SliceDoc], ctx: Ctx
 ) -> list[str]:
@@ -652,6 +691,22 @@ def check_doc_drift(
 
         # Resolve which slices are actually linked
         linked_slices = [sid for sid in td.slices if sid in by_id]
+
+        # Fingerprint anchor (preferred): compare the current content hash of the
+        # tracked files against the hash recorded at stamp time. Independent of
+        # git history, so it survives rebases and the edit->stamp->commit order.
+        # Legacy entries without a fingerprint fall through to the SHA-diff below.
+        if td.fingerprint:
+            concrete = _resolve_tracked_concrete_files(td, by_id, ctx)
+            if _content_fingerprint(concrete, ctx.repo_root) != td.fingerprint:
+                drifted.append(DocDrift(
+                    doc_id=td.doc_id,
+                    path=td.path,
+                    verified_at=td.verified_at or "(never)",
+                    affected_slices=linked_slices,
+                    changed_files=concrete,
+                ))
+            continue
 
         if not td.verified_at:
             # Never verified — always stale
@@ -725,26 +780,20 @@ def _docs_for_slice(
     return [td for td in tracked_docs if slice_id in td.slices]
 
 
-def _dirty_tracked_files(
-    tracked_docs: list[TrackedDoc],
-    slices: list[SliceDoc],
-    ctx: Ctx,
-) -> dict[str, list[str]]:
-    """Return dirty source files for each tracked doc, relative to HEAD."""
-    by_id = _slice_map(slices)
-    dirty_by_doc: dict[str, list[str]] = {}
-    for td in tracked_docs:
-        files = _resolve_tracked_files(td, by_id)
-        if not files:
-            continue
-        try:
-            proc = ctx.git("diff", "--name-only", "HEAD", "--", *files, check=False)
-        except (OSError, FileNotFoundError):
-            continue
-        changed = sorted(line.strip() for line in proc.stdout.splitlines() if line.strip())
-        if changed:
-            dirty_by_doc[td.doc_id] = changed
-    return dirty_by_doc
+def _fingerprint_equal(recorded: str, current: str) -> bool:
+    """Compare two INDEX fingerprints like-for-like.
+
+    Two git SHAs (<=40 hex) may differ only in short-vs-full length, so they
+    match on the shared prefix. A 64-char content digest must match exactly —
+    never prefix-match a SHA against a digest (the old bug, which could both
+    false-positive and, worse, false-negative).
+    """
+    if recorded == current:
+        return True
+    if len(recorded) <= 40 and len(current) <= 40:
+        n = min(len(recorded), len(current))
+        return n > 0 and recorded[:n] == current[:n]
+    return False
 
 
 def _frontmatter_doc_id(doc_path: Path) -> str | None:
@@ -893,8 +942,7 @@ def run_check(
             recorded = sha_match.group(1).strip()
         if recorded is not None:
             current = ctx.source_fingerprint(docs)
-            min_len = min(len(recorded), len(current))
-            if current[:min_len] != recorded[:min_len]:
+            if not _fingerprint_equal(recorded, current):
                 result.warnings.append(
                     f"INDEX.md stale: recorded {recorded[:12]}, source fingerprint is {current[:12]}"
                 )
@@ -1284,32 +1332,20 @@ def cmd_stamp(args: argparse.Namespace, ctx: Ctx) -> int:
             return 0
 
     slices = load_slice_docs(ctx)
-    dirty_by_doc = _dirty_tracked_files(targets, slices, ctx)
-    if dirty_by_doc:
-        print(
-            "cannot stamp docs while their tracked source files are uncommitted; "
-            "commit source/doc changes first, then run slice stamp",
-            file=sys.stderr,
-        )
-        for doc_id, files in dirty_by_doc.items():
-            print(f"{doc_id}:", file=sys.stderr)
-            for path in files:
-                print(f"  - {path}", file=sys.stderr)
-        return 1
+    by_id = _slice_map(slices)
+    target_ids = {t.doc_id for t in targets}
 
-    # Update verified_at in the manifest
+    # Record a content fingerprint of each doc's tracked files (the staleness
+    # anchor) plus the HEAD short-SHA as a human-readable note. Fingerprinting
+    # captures exactly the verified content, so stamping a dirty tree is correct
+    # and no commit-before-stamp guard is needed.
     updated = []
     for td in manifest.docs:
-        if any(t.doc_id == td.doc_id for t in targets):
-            updated.append(TrackedDoc(
-                doc_id=td.doc_id,
-                path=td.path,
-                slices=td.slices,
-                verified_at=short_sha,
-                tags=td.tags,
-                include=td.include,
-                exclude=td.exclude,
-            ))
+        if td.doc_id in target_ids:
+            fp = _content_fingerprint(
+                _resolve_tracked_concrete_files(td, by_id, ctx), ctx.repo_root
+            )
+            updated.append(replace(td, verified_at=short_sha, fingerprint=fp))
             print(f"stamped {td.doc_id} -> {short_sha}")
         else:
             updated.append(td)
@@ -1776,7 +1812,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_stale_docs)
 
     # stamp
-    sp = sub.add_parser("stamp", help="Update verified_at to HEAD in DOCS.yaml.")
+    sp = sub.add_parser(
+        "stamp",
+        help="Mark docs verified: record a content fingerprint of their tracked sources.",
+    )
     sp.add_argument("doc_id", nargs="?", default=None, help="Stamp a specific doc by doc_id.")
     sp.add_argument("--slice", metavar="SLICE_ID", help="Stamp all docs for a slice.")
     sp.add_argument("--doc", metavar="PATH", help="Stamp a specific doc by vault-relative path.")

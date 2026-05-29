@@ -372,13 +372,57 @@ class TestStamp:
         auth = next(td for td in manifest.docs if td.doc_id == "auth-guide")
         assert "auth" in auth.tags
 
-    def test_stamp_refuses_dirty_tracked_source(self, repo: Path, capsys):
-        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return False\n")
+    def test_stamp_records_fingerprint(self, repo: Path, ctx: cli.Ctx):
+        cli.main(["--repo", str(repo), "stamp", "auth-guide"])
+        manifest = cli.load_doc_manifest(ctx)
+        auth = next(td for td in manifest.docs if td.doc_id == "auth-guide")
+        assert len(auth.fingerprint) == 64  # sha256 hex
+
+    def test_stamp_dirty_tree_now_allowed(self, repo: Path, ctx: cli.Ctx):
+        # The dirty-guard is gone: stamping uncommitted content is correct and
+        # records a fingerprint of exactly that content.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return None\n")
         rc = cli.main(["--repo", str(repo), "stamp", "auth-guide"])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "cannot stamp docs while their tracked source files are uncommitted" in err
-        assert "src/auth/middleware.py" in err
+        assert rc == 0
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_edit_stamp_commit_not_stale(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION: the exact sequencing the git-SHA anchor broke.
+        # Edit a tracked source, stamp while dirty, then commit -> NOT stale.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return True\n")
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit auth"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_rebase_after_stamp_not_stale(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION: rewriting history makes the stamped SHA vanish. The
+        # fingerprint survives because file contents are unchanged.
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        subprocess.run(["git", "commit", "--amend", "-m", "reworded", "--allow-empty"],
+                       cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_legacy_sha_fallback_flags_drift(self, repo: Path, ctx: cli.Ctx):
+        # A manifest entry with verified_at but no fingerprint (the fixture)
+        # still gets evaluated via the SHA-diff fallback.
+        (repo / "src" / "api" / "handlers.py").write_text("def get_user():\n    return 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit api"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert any(d.doc_id == "api-ref" for d in drift)
+        assert all(td.fingerprint == "" for td in manifest.docs)  # none migrated yet
 
     def test_stamp_no_manifest(self, repo: Path):
         (repo / "slices" / "DOCS.yaml").unlink()

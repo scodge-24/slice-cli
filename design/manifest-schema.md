@@ -22,7 +22,8 @@ docs:
       - rust-abc-types
       - rust-abc-funcs-derivative
       - rust-abc-props
-    verified_at: abc123def456    # commit SHA when doc was last reviewed
+    fingerprint: 9f86d081...    # sha256 of tracked files at stamp time (staleness anchor)
+    verified_at: abc123def456    # HEAD short-SHA at stamp time (human note)
     tags:                        # optional, human-semantic (mirrors vault frontmatter)
       - boundary
       - contracts
@@ -48,7 +49,8 @@ docs:
 |---|---|---|---|
 | `path` | string | Yes | Doc file path, relative to `vault_root` |
 | `slices` | list[string] | Yes | Slice IDs this doc tracks. Must match existing `slice_id` values. |
-| `verified_at` | string | No | Git commit SHA (short or full) when the doc was last verified as current. Empty or `null` means "never verified". |
+| `fingerprint` | string | No | SHA-256 content hash of the doc's resolved tracked files at stamp time. The staleness anchor. Written by `slice stamp`. Absent on entries stamped before this field existed. |
+| `verified_at` | string | No | HEAD short-SHA at stamp time. Human-readable note only — not used for staleness when `fingerprint` is present. Empty/`null` means "never verified". |
 | `tags` | list[string] | No | Human-semantic tags. Searchable via `slice find`. |
 | `include` | list[string] | No | If set, overrides slice-level `files[]` — only these paths are checked for drift. Supports globs. |
 | `exclude` | list[string] | No | Paths/globs to exclude from drift detection. Applied after `include` or slice `files[]` resolution. |
@@ -60,17 +62,19 @@ For each doc entry:
 1. **Resolve tracked files**:
    - If `include` is set: use those paths directly
    - Otherwise: union all `files[]` from the doc's linked `slices`
-   - Apply `exclude` filter (fnmatch glob matching)
+   - Apply `exclude` filter (fnmatch glob matching), then expand globs to concrete files
 
-2. **Check for changes**:
-   - `git diff --name-only <verified_at>..HEAD -- <resolved-files>` (committed changes)
-   - `git diff --name-only HEAD -- <resolved-files>` (staged + unstaged changes)
-   - Union the results
+2. **Decide staleness**:
+   - **If `fingerprint` is present (preferred):** recompute the SHA-256 content hash
+     of the resolved files. Stale iff it differs from the recorded `fingerprint`.
+     This is independent of git history, so it is correct across the
+     edit→stamp→commit ordering and survives rebases/amends.
+   - **If `fingerprint` is absent (legacy fallback):** use git diff against
+     `verified_at` — `git diff --name-only <verified_at>..HEAD -- <files>` unioned
+     with `git diff --name-only HEAD -- <files>`. Stale if non-empty. Empty/null
+     `verified_at` → unverified (always stale); invalid SHA → git error, treat as stale.
 
-3. **Report**:
-   - If any resolved file changed: doc is stale
-   - If `verified_at` is null/empty: doc is "unverified" (always stale)
-   - If `verified_at` is an invalid SHA: report git error, treat as stale
+Re-stamping a legacy entry migrates it to a fingerprint.
 
 ## Doc Frontmatter Schema
 

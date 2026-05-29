@@ -16,6 +16,7 @@ run_stats() {
   local label="$1"
   shift
   python3 - "$REPEAT" "$label" "$@" <<'PY'
+import math
 import statistics
 import subprocess
 import sys
@@ -30,7 +31,7 @@ for _ in range(repeat):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     samples.append((time.perf_counter_ns() - start) / 1_000_000)
 samples.sort()
-p95_index = min(len(samples) - 1, int(len(samples) * 0.95))
+p95_index = min(len(samples) - 1, math.ceil(len(samples) * 0.95) - 1)
 print(
     f"| `{label}` | {statistics.mean(samples):.2f} | {min(samples):.2f} | "
     f"{max(samples):.2f} | {samples[p95_index]:.2f} |"

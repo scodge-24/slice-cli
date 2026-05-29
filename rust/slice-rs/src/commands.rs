@@ -17,7 +17,10 @@ use crate::models::{
     ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc, TrackedDocSummary,
 };
 use crate::paths::{expand_literal_or_existing, matches_path, repo_join};
-use crate::slices::{docs_for_slice, load_slice_docs, owners_for_path, slice_for_selector};
+use crate::slices::{
+    docs_for_slice, load_slice_body, load_slice_docs, load_slice_docs_meta, owners_for_path,
+    slice_for_selector,
+};
 use crate::{Error, Result};
 
 const STANDARD_SECTIONS: [&str; 5] = [
@@ -38,7 +41,7 @@ pub enum ShowMode {
 }
 
 pub fn list(ctx: &Context, json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     if json {
         let rows = docs
@@ -75,7 +78,11 @@ pub fn list(ctx: &Context, json: bool) -> Result<i32> {
 }
 
 pub fn show(ctx: &Context, selector: &str, mode: ShowMode, json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = if matches!(mode, ShowMode::Metadata) {
+        load_slice_docs_meta(ctx)?
+    } else {
+        load_slice_docs(ctx)?
+    };
     let doc = require_slice(&docs, selector)?;
     if !matches!(mode, ShowMode::Metadata) {
         return show_sections(doc, mode, json);
@@ -121,7 +128,7 @@ pub fn show(ctx: &Context, selector: &str, mode: ShowMode, json: bool) -> Result
 }
 
 pub fn files(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
     if json {
         emit_json(&doc.files)?;
@@ -140,7 +147,7 @@ pub fn deps(
     transitive: bool,
     json: bool,
 ) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
     let (dependencies, mode) = if reverse {
         (
@@ -170,7 +177,7 @@ pub fn deps(
 }
 
 pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let owners = owners_for_path(&docs, path, ctx);
     if json {
         let output = owners
@@ -197,7 +204,7 @@ pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
 }
 
 pub fn affected_docs(ctx: &Context, paths: &[String], json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     let mut affected_slice_ids = FxHashSet::default();
     for path in paths {
@@ -294,7 +301,7 @@ pub fn context(
     best_effort: bool,
     json: bool,
 ) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     let ambiguity = if strict && best_effort {
         return Err(Error::InvalidInput(
@@ -343,6 +350,7 @@ pub fn context(
         let slices = targets
             .into_iter()
             .map(|doc| {
+                let body = load_slice_body(ctx, doc)?;
                 let linked_docs = docs_for_slice(&manifest.docs, &doc.slice_id)
                     .into_iter()
                     .map(|tracked| ContextDoc {
@@ -352,17 +360,17 @@ pub fn context(
                         verified_at: tracked.verified_at.clone(),
                     })
                     .collect();
-                ContextSlice {
+                Ok(ContextSlice {
                     dependencies: doc.dependencies.clone(),
                     description: doc.description.clone(),
                     doc_path: ctx.rel(&doc.doc_path),
                     docs: linked_docs,
                     files: doc.files.clone(),
-                    sections: present_sections(&doc.body),
+                    sections: present_sections(&body),
                     slice_id: doc.slice_id.clone(),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         emit_json(&ContextOutput { slices })?;
     } else {
         for doc in targets {
@@ -371,7 +379,8 @@ pub fn context(
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));
-            for (heading, text) in present_sections(&doc.body) {
+            let body = load_slice_body(ctx, doc)?;
+            for (heading, text) in present_sections(&body) {
                 println!("{heading}:");
                 println!("{text}");
             }
@@ -415,7 +424,7 @@ pub fn grep(
     ignore_case: bool,
     fixed_strings: bool,
 ) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
     if doc.files.is_empty() {
         eprintln!("{} has no files[]", doc.slice_id);
@@ -450,7 +459,7 @@ pub fn grep(
 }
 
 pub fn docs(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
-    let slices = load_slice_docs(ctx)?;
+    let slices = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&slices, selector)?;
     let manifest = load_doc_manifest(ctx)?;
     let linked_docs = docs_for_slice(&manifest.docs, &doc.slice_id);
@@ -504,7 +513,7 @@ pub fn docs(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
 }
 
 pub fn stale_docs(ctx: &Context, json: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     let stale = stale_docs_for(ctx, &docs, &manifest.docs, StalenessMode::Attributed);
     let any_stale = !stale.is_empty();
@@ -553,7 +562,7 @@ pub fn stamp(
         return Ok(empty_code);
     }
 
-    let slices = load_slice_docs(ctx)?;
+    let slices = load_slice_docs_meta(ctx)?;
     let by_id = slices
         .iter()
         .map(|slice| (slice.slice_id.as_str(), slice))
@@ -594,7 +603,7 @@ pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: boo
         return Ok(2);
     }
 
-    let slices = load_slice_docs(ctx)?;
+    let slices = load_slice_docs_meta(ctx)?;
     let vault_root = relative_path(&vault_dir, ctx.slices_dir());
     let mut entries = BTreeMap::<String, BootstrapEntry>::new();
     let mut unresolved = Vec::<(String, String)>::new();
@@ -751,7 +760,7 @@ fn stamp_targets(
         return Ok((docs.iter().map(|doc| doc.doc_id.clone()).collect(), 0));
     }
 
-    let slices = load_slice_docs(ctx)?;
+    let slices = load_slice_docs_meta(ctx)?;
     let drifted = stale_docs_for(ctx, &slices, docs, StalenessMode::Attributed);
     if drifted.is_empty() {
         println!("all docs are up to date");

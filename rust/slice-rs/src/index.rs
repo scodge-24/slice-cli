@@ -3,7 +3,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::context::Context;
 use crate::models::SliceDoc;
 use crate::paths::expand_literal_or_existing;
-use crate::slices::load_slice_docs;
+use crate::slices::load_slice_docs_meta;
 use crate::{Error, Result};
 
 #[must_use]
@@ -66,7 +66,7 @@ pub fn source_fingerprint(docs: &[SliceDoc], ctx: &Context) -> String {
 }
 
 pub fn sync_index(ctx: &Context, stdout: bool, check: bool) -> Result<i32> {
-    let docs = load_slice_docs(ctx)?;
+    let docs = load_slice_docs_meta(ctx)?;
     let content = generate_index(&docs, ctx);
     if stdout {
         print!("{content}");

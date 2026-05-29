@@ -9,13 +9,13 @@ Path arg: `src/auth/middleware.py`
 
 | Command | Mean ms | Min ms | Max ms | P95 ms |
 |---------|---------|--------|--------|--------|
-| `python list --json` | 170.13 | 141.88 | 195.83 | 195.32 |
-| `rust list --json` | 2.81 | 2.43 | 3.90 | 3.79 |
-| `python show auth-service --json` | 170.40 | 152.57 | 192.41 | 189.32 |
-| `rust show auth-service --json` | 3.27 | 2.37 | 4.73 | 4.13 |
-| `python for src/auth/middleware.py --json` | 221.07 | 141.24 | 516.21 | 427.93 |
-| `rust for src/auth/middleware.py --json` | 3.65 | 3.20 | 4.70 | 4.33 |
-| `python context src/auth/middleware.py --json` | 191.85 | 160.67 | 384.54 | 237.20 |
-| `rust context src/auth/middleware.py --json` | 2.96 | 2.63 | 4.06 | 3.89 |
-| `python affected-docs src/auth/middleware.py --json` | 180.59 | 154.98 | 225.35 | 211.29 |
-| `rust affected-docs src/auth/middleware.py --json` | 2.96 | 2.32 | 4.32 | 4.08 |
+| `python list --json` | 239.22 | 170.80 | 361.41 | 320.11 |
+| `rust list --json` | 3.17 | 2.27 | 4.91 | 4.43 |
+| `python show auth-service --json` | 218.10 | 168.77 | 272.25 | 268.07 |
+| `rust show auth-service --json` | 3.23 | 2.30 | 5.30 | 4.07 |
+| `python for src/auth/middleware.py --json` | 216.08 | 186.08 | 253.78 | 251.62 |
+| `rust for src/auth/middleware.py --json` | 3.10 | 2.06 | 4.66 | 4.47 |
+| `python context src/auth/middleware.py --json` | 229.57 | 176.79 | 273.17 | 262.37 |
+| `rust context src/auth/middleware.py --json` | 3.29 | 2.49 | 4.13 | 3.99 |
+| `python affected-docs src/auth/middleware.py --json` | 238.74 | 188.42 | 313.09 | 267.06 |
+| `rust affected-docs src/auth/middleware.py --json` | 3.23 | 2.56 | 4.73 | 4.19 |

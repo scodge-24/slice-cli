@@ -1717,6 +1717,8 @@ describe, via `slice` (slice-cli) and `slices/DOCS.yaml`.
   docs may need updating. Update stale docs, then `slice stamp <doc-id>` to mark
   them verified.
 - `slice stale-docs` lists everything currently stale (exit 1 if any are stale).
+- If `slices/` is missing or out of date, run `/slice-codebase` to (re)generate
+  slice definitions.
 """
 
 _HOOK_SCRIPT = """\
@@ -1751,6 +1753,267 @@ jobs:
 """
 
 
+# Bundled agent-side templates: the slice-codebase skill + codebase-slicer
+# agent. Canonical readable copies live at skills/slice-codebase/SKILL.md and
+# agents/codebase-slicer.md (the plugin reads those). These embedded copies
+# let `slice init --agent` install slicing when slice-cli was pip-installed as
+# a bare module (the wheel ships only slices_cli.py). test_slices_cli.py asserts
+# the embedded copies stay byte-identical to the committed files.
+_SLICE_CODEBASE_SKILL = """\
+---
+name: slice-codebase
+description: "Generates or refreshes repo slice definitions in slices/. Use when slices are missing, stale, or need updating — or when asked to generate, refresh, update, reslice, or check slices. Aliases: slice, gen-slices, reslice, update-slices, check-slices."
+model: sonnet
+effort: medium
+---
+
+# Slice Codebase
+
+Ensure the repo has current slice definitions, using the `codebase-slicer` subagent for scanning and the `slice` CLI for validation.
+
+**Running the slice CLI.** Steps below call `slice <cmd>`. Use `slice` if it is on PATH (the `pip install slice-cli` entry point). If it is not, fall back to the bundled script: `python3 "$CLAUDE_PLUGIN_ROOT/slices_cli.py" <cmd>` (when running as the slice-cli plugin) or `python3 /path/to/slices_cli.py <cmd>`.
+
+**Subagent type.** The scan agent is referenced below as `slice-cli:codebase-slicer` (its name when installed via the slice-cli plugin). If slicing was bootstrapped with `slice init --agent` instead, the agent is installed loose as plain `codebase-slicer` — use that name.
+
+If `$ARGUMENTS` contains file or directory paths (e.g., `/slice-codebase src/auth/ src/models/user.rs`), treat them as **scope hints** — the scout's starting search radius. Scope hints narrow where scanning begins but do not cap the result: the scout must still expand outward to include files outside the hints when dependencies cross the boundary.
+
+## Check First
+
+- Look for `slices/INDEX.md` at the repo root.
+- **Up to date**: read the commit hash from INDEX.md, compare against `git rev-parse HEAD`. If they match, report "slices up to date" and stop.
+- **Stale** (INDEX.md exists but hash is old): run [Diff Slice Update](#diff-slice-update).
+- **Missing** (no INDEX.md): run [Full Slice Generation](#full-slice-generation). This covers the edge case where `slices/*.md` files exist but the index was deleted — do not attempt a diff update with no base hash.
+
+---
+
+<important if="slices/ directory is missing or full regeneration was explicitly requested">
+
+## Full Slice Generation
+
+Orchestrate three phases using `subagent_type: "slice-cli:codebase-slicer"` for Phases 1 and 2.
+
+### Phase 1 — Scout (one agent)
+
+Spawn exactly ONE `slice-cli:codebase-slicer` agent. The scout returns candidate boundaries only — no LSP call hierarchies, no deep file reads.
+
+```
+Agent call:
+  subagent_type: "slice-cli:codebase-slicer"
+  prompt: "Scout mode. Scan this repo and return candidate slice boundaries. For each candidate return: id, one-line description, estimated LoC, file list, and entry point files. Source code only — ignore docs/, specs/, *.md, README, config files, and non-source files. Do NOT read file contents in depth. You may use LSP workspaceSymbol for a fast symbol overview, but do NOT trace call hierarchies (incomingCalls/outgoingCalls) — that is Phase 2 work. Directory structure, file counts, and top-level symbols only."
+```
+
+<important if="scope hints were provided in $ARGUMENTS">
+Append to the scout prompt: "Start your scan from these paths as the search origin: <scope hints>. Expand to related files and modules outside these paths when dependencies cross the boundary."
+</important>
+
+Wait for results. Review the candidate list for obvious issues (overlapping files, missing areas). Do NOT launch Phase 2 until scout results are in hand.
+
+### Phase 2 — Refine (parallel agents)
+
+Create the `slices/` directory first. Spawn one `slice-cli:codebase-slicer` agent **per candidate** from Phase 1, all in parallel (single message, multiple Agent calls).
+
+Include the full candidate ID list in every refine prompt so agents can map cross-slice dependencies correctly.
+
+```
+Agent call (one per candidate, all launched in parallel):
+  subagent_type: "slice-cli:codebase-slicer"
+  prompt: "Refine mode. Analyze this candidate and write the slice file to slices/<id>.md:
+    - candidate-id: <id>
+    - files: <file list>
+    - entry_points: <entry points>
+    - all candidate IDs: <full list from scout>
+    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly."
+```
+
+Wait for ALL refine agents to complete before Phase 3.
+
+### Phase 3 — Validate and Index
+
+1. **Validate** — run:
+   ```
+   slice check
+   ```
+   - **Pass**: proceed.
+   - **Fail**: read the error output, fix the offending slice files, re-run until it passes.
+     Common fixes: resolve overlapping file assignments (assign to the slice with stronger coupling), fix dangling dependency references, correct file paths.
+
+2. **Generate `slices/INDEX.md`** — run:
+   ```
+   slice sync-index
+   ```
+
+</important>
+
+---
+
+<important if="slices/INDEX.md exists but its commit hash is behind HEAD">
+
+## Diff Slice Update
+
+1. Get changed files: `git diff <index-hash> HEAD --name-only`
+2. Spawn one `slice-cli:codebase-slicer` agent in scout mode, passing only the changed files:
+
+```
+Agent call:
+  subagent_type: "slice-cli:codebase-slicer"
+  prompt: "Scout mode. Only look at these changed files and determine which existing slices need updating, and whether any new slices are needed: <changed file list>. Source code only."
+```
+
+<important if="scope hints were provided in $ARGUMENTS">
+Filter the changed file list to files within the hinted paths before passing to the scout. If no changed files fall within the hints, pass the full changed file list instead.
+</important>
+
+3. For each affected slice file: update its `files` list to reflect additions/deletions, adjust `entry_points` if affected, and fix any `dependencies` references to new or renamed slices. Then regenerate the index:
+   ```
+   slice sync-index
+   ```
+4. Run `slice check` to validate. Fix any errors before finishing.
+
+The refine phase is skipped for diff updates — directory-level changes only.
+
+</important>
+
+---
+
+## Output
+
+Report:
+- Status: generated N slices / updated N slices / already current
+- Any validation errors encountered and how they were resolved
+- Path to `slices/INDEX.md`
+
+---
+
+## Constraints
+
+- Never combine scout and refine work into one agent call — they have different responsibilities and tooling budgets.
+- Never run refine agents sequentially — always parallel.
+- Never use Explore, general-purpose, or any other agent type — always the `codebase-slicer` agent.
+- Never skip validation (Phase 3) after full generation.
+- Never ask the user for input during slicing — it is mechanical.
+"""
+
+_CODEBASE_SLICER_AGENT = """\
+---
+name: codebase-slicer
+description: Maps codebase structure into slice boundaries. Two modes — "scout" scans the whole repo and returns candidate slice boundaries; "refine" takes one candidate area and uses LSP to map its exports, entry points, and dependencies. Call with mode and scope in the prompt.
+tools: Read, Grep, Glob, LS, LSP, Write
+model: sonnet
+---
+
+You are a specialist at mapping codebase structure. You operate in one of two modes, specified in your prompt.
+
+## CRITICAL: YOU ARE A DOCUMENTARIAN
+
+- DO NOT suggest improvements or changes to the codebase
+- DO NOT critique architecture, code quality, or design decisions
+- DO NOT perform root cause analysis or identify problems
+- ONLY map what exists, where it exists, and how components relate
+- DO NOT spawn sub-agents — you are the sub-agent
+- **ONLY map source code** — ignore docs/, specs/, README*, *.md, CHANGELOG, LICENSE, and any other non-source files. Slices are for code that agents will research and modify, not documentation or specifications.
+
+<important if="your prompt says 'scout' or 'scan the repo'">
+
+## Scout Mode
+
+Your job: map the whole repo into candidate slice boundaries. Fast and shallow.
+
+**Steps:**
+
+1. `LS` the repo root and major directories to understand the top-level shape
+2. `Glob` for source files to estimate LoC per area — only source code (*.py, *.ts, *.js, *.go, *.rs, etc.), skip docs, configs, markdown, and non-code files
+3. Optionally use `LSP workspaceSymbol` for a fast overview of top-level symbols across the repo — helps identify module boundaries and key abstractions without reading files
+4. Identify candidate slice boundaries based on directory structure, symbol overview, and module organization — skip directories that are purely documentation (docs/, wiki/, etc.)
+
+**Boundary strategy:**
+- Start with directories — the file system is the strongest signal for module boundaries
+- Target 500-2000 LoC per slice
+- Merge small modules (<~500 LoC) with their closest dependency
+- Split large modules (~2000+ LoC) along natural seams visible from directory structure
+- Exception: a tightly cohesive module stays as one slice even if it exceeds the target
+
+**Output format** — return a structured list of candidates:
+
+```
+## Candidate Slices
+
+### <candidate-id>
+- description: <one-line summary>
+- estimated_loc: <number>
+- files:
+  - <path>
+  - <path>
+- entry_points: <main files or directories to investigate with LSP>
+- split_reason: <why this is a separate slice, if not obvious from directory structure>
+
+### <candidate-id>
+...
+```
+
+**Do NOT** trace call hierarchies (incomingCalls/outgoingCalls) in scout mode — that's refine work.
+**Do NOT** read file contents in depth.
+**Do NOT** write any files — return your candidates as output text only.
+This must be fast — directory structure, file counts, and optionally workspaceSymbol only.
+
+</important>
+
+<important if="your prompt says 'refine' and specifies a candidate slice area">
+
+## Refine Mode
+
+Your job: take one candidate slice area (provided in your prompt with its file list) and use LSP to map its internals and validate the boundary.
+
+**Steps:**
+
+1. Use `documentSymbol` on key files to identify exports, classes, and public interfaces
+2. Use `outgoingCalls`/`incomingCalls` on entry points to map the real dependency graph
+3. Check whether the candidate boundary matches the actual call graph
+4. Identify abstractions that define this slice's public interface
+5. Identify dependencies on other areas of the codebase (by file path — the orchestrator will map these to slice IDs)
+6. Note any files that should be excluded (tests, generated code, etc.)
+
+**Step 6: Write the slice file.** Write your findings directly to `slices/<slice-id>.md` using this exact format:
+
+```yaml
+---
+slice_id: <kebab-case-id>
+description: "<one-line summary>"
+loc: <estimated lines of code>
+files:
+  - <path relative to repo root>
+abstractions:
+  - "<ExportedName — what it does>"
+exclusions:
+  - <paths explicitly not in this slice>
+dependencies:
+  - <other slice IDs this slice depends on>
+---
+
+# <Slice Title>
+
+<2-5 sentences: what this slice covers, main entry points, key data flows.
+Note any boundary decisions (e.g., why LoC exceeds target, why files are grouped this way).>
+```
+
+For dependencies, use slice IDs (provided in your prompt alongside the candidate list), not file paths. If a dependency target isn't in the candidate list, note the file path and prefix with `external:`.
+
+Read files selectively — focus on entry points and public interfaces, not every line.
+
+</important>
+
+## What NOT to Do
+
+- Don't analyze implementation details beyond what's needed for boundary decisions
+- Don't suggest better code organization
+- Don't comment on code quality or architecture decisions
+- Don't create slices for test directories — note them in exclusions
+- Don't create slices smaller than ~200 LoC unless they're genuinely independent
+- Don't spawn sub-agents — you are the sub-agent
+- Don't include documentation, specs, or non-source files (*.md, docs/, specs/, README, CHANGELOG, LICENSE) in slices — slices are for source code only
+- Don't create slices for config files, CI pipelines, or build scripts unless they contain substantial logic
+"""
+
+
 def _render_agent_block() -> str:
     return f"{_INIT_BLOCK_START}\n{_AGENT_INSTRUCTIONS}{_INIT_BLOCK_END}\n"
 
@@ -1770,7 +2033,8 @@ def _upsert_block(existing: str, block: str) -> str:
 
 
 def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
-    """Wire slice-cli into a repo: agent-instruction block, optional hook + CI."""
+    """Wire slice-cli into a repo: agent-instruction block, optional hook + CI,
+    optional slicing skill + agent (--agent)."""
     root = ctx.repo_root
     block = _render_agent_block()
     planned: list[tuple[Path, str]] = []
@@ -1789,6 +2053,18 @@ def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
         planned.append((root / ".git" / "hooks" / "pre-commit", _HOOK_SCRIPT))
     if args.ci:
         planned.append((root / ".github" / "workflows" / "slice-staleness.yml", _CI_WORKFLOW))
+
+    if args.agent:
+        # Install the slice-codebase skill + codebase-slicer agent so an agent can
+        # generate slices here. --global puts them in ~/.claude (usable in every
+        # repo); otherwise project-local .claude/. Loose installs are not
+        # namespaced, so the skill must reference the bare `codebase-slicer`.
+        base = Path.home() if args.global_ else root
+        loose_skill = _SLICE_CODEBASE_SKILL.replace(
+            "slice-cli:codebase-slicer", "codebase-slicer"
+        )
+        planned.append((base / ".claude" / "skills" / "slice-codebase" / "SKILL.md", loose_skill))
+        planned.append((base / ".claude" / "agents" / "codebase-slicer.md", _CODEBASE_SLICER_AGENT))
 
     if args.dry_run:
         for path, _ in planned:
@@ -2023,18 +2299,24 @@ def build_parser() -> argparse.ArgumentParser:
             "  slice init                 # add the agent-instruction block to CLAUDE.md/AGENTS.md\n"
             "  slice init --hook          # also install a pre-commit staleness reminder\n"
             "  slice init --hook --ci     # also add a GitHub Actions staleness check\n"
+            "  slice init --agent         # also install the slice-codebase skill + codebase-slicer agent\n"
+            "  slice init --agent --global  # install the skill + agent into ~/.claude (every repo)\n"
             "  slice init --dry-run       # preview without writing\n"
             "\n"
             "The agent block is wrapped in <!-- slice-cli:start/end --> markers and is\n"
-            "idempotent — re-running updates it in place."
+            "idempotent — re-running updates it in place. --agent writes the slicing skill\n"
+            "and agent into .claude/ (or ~/.claude with --global); for the managed\n"
+            "alternative, install the slice-cli plugin instead."
         ),
     )
     sp.add_argument("--hook", action="store_true",
                     help="Install a git pre-commit hook that warns about stale docs.")
     sp.add_argument("--ci", action="store_true",
                     help="Write a GitHub Actions workflow running `slice check`.")
+    sp.add_argument("--agent", action="store_true",
+                    help="Install the slice-codebase skill + codebase-slicer agent into .claude/.")
     sp.add_argument("--global", action="store_true", dest="global_",
-                    help="Write the agent block to your user-level ~/.claude/CLAUDE.md instead.")
+                    help="Write to your user-level ~/.claude instead of the repo (block, skill, agent).")
     sp.add_argument("--dry-run", action="store_true",
                     help="Print what would be written without writing.")
     sp.set_defaults(func=cmd_init)

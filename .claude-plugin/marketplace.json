@@ -1,0 +1,18 @@
+{
+  "name": "slice-cli",
+  "description": "slice-cli — codebase slicing and doc-code staleness tracking for AI agents.",
+  "owner": {
+    "name": "scodge"
+  },
+  "plugins": [
+    {
+      "name": "slice-cli",
+      "description": "Generate codebase slices (slice-codebase skill + codebase-slicer agent) and track doc-code staleness via the slice CLI.",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/scodge-24/slice-cli.git"
+      },
+      "category": "development"
+    }
+  ]
+}

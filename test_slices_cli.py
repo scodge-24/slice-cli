@@ -1019,6 +1019,40 @@ class TestInit:
         assert "examples:" in out
         assert "--hook" in out and "--ci" in out
 
+    def test_init_agent_installs_skill_and_agent(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init", "--agent"]) == 0
+        skill = repo / ".claude" / "skills" / "slice-codebase" / "SKILL.md"
+        agent = repo / ".claude" / "agents" / "codebase-slicer.md"
+        assert skill.exists() and agent.exists()
+        assert "name: slice-codebase" in skill.read_text()
+        assert "name: codebase-slicer" in agent.read_text()
+
+    def test_init_agent_loose_install_uses_bare_agent_name(self, repo: Path):
+        # Loose (non-plugin) installs aren't namespaced — the skill must call the
+        # bare `codebase-slicer`, never `slice-cli:codebase-slicer`.
+        cli.main(["--repo", str(repo), "init", "--agent"])
+        text = (repo / ".claude" / "skills" / "slice-codebase" / "SKILL.md").read_text()
+        assert "slice-cli:codebase-slicer" not in text
+        assert 'subagent_type: "codebase-slicer"' in text
+
+    def test_init_agent_dry_run_writes_nothing(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "init", "--agent", "--dry-run"]) == 0
+        assert not (repo / ".claude").exists()
+        out = capsys.readouterr().out
+        assert "slice-codebase/SKILL.md" in out and "codebase-slicer.md" in out
+
+    def test_init_without_agent_skips_skill(self, repo: Path):
+        cli.main(["--repo", str(repo), "init"])
+        assert not (repo / ".claude" / "skills").exists()
+
+    def test_embedded_templates_match_committed_files(self):
+        # The plugin reads the on-disk files; `slice init --agent` writes the
+        # embedded constants. They must stay byte-identical or the two install
+        # channels drift.
+        root = Path(cli.__file__).resolve().parent
+        assert cli._SLICE_CODEBASE_SKILL == (root / "skills" / "slice-codebase" / "SKILL.md").read_text()
+        assert cli._CODEBASE_SLICER_AGENT == (root / "agents" / "codebase-slicer.md").read_text()
+
 
 # ---------------------------------------------------------------------------
 # Command coverage: docs-bootstrap, files, deps, grep, transitive/circular

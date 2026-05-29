@@ -85,6 +85,33 @@ slice init --ci       # + a GitHub Actions staleness check
 and a `DOCS.yaml` manifest mapping docs to slices; see
 [`design/`](design/) for architecture, the manifest schema, and the migration guide.
 
+## Generating slices with an agent
+
+Writing `slices/*.md` by hand is optional. slice-cli ships the agent side too —
+a `slice-codebase` skill that orchestrates a `codebase-slicer` subagent to scan
+the repo and write slice files for you (run with `/slice-codebase` in Claude
+Code). Two ways to install it, both work across machines:
+
+**As a Claude Code plugin (managed, namespaced, auto-updates):**
+
+```bash
+claude plugin marketplace add scodge-24/slice-cli
+claude plugin install slice-cli@slice-cli
+pip install slice-cli            # the plugin's skill calls `slice` on PATH
+```
+
+**Or bootstrap it from the CLI (no plugin system):**
+
+```bash
+pip install slice-cli
+slice init --agent --global      # writes the skill + agent into ~/.claude
+```
+
+`--global` makes slicing available in every repo on the machine; drop it to
+install into the current repo's `.claude/` only. Either way, then run
+`/slice-codebase` in the repo you want sliced. Generation needs an LSP-capable
+environment (the agent uses LSP to map call graphs).
+
 ## Docs
 
 - [`design/architecture.md`](design/architecture.md) — how it works

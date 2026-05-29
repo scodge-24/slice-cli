@@ -1,0 +1,97 @@
+# slice-cli
+
+**Know which design docs went stale the moment you change code.**
+
+`slice` turns a folder of "slice" documents (`slices/*.md`) into a query surface
+for humans and AI agents, and tracks whether your design docs are still accurate
+relative to the code they describe. A *slice* is a named region of a codebase
+(its files, dependencies, and durable system notes). `DOCS.yaml` maps docs to
+slices and remembers a content fingerprint of the code each doc was last verified
+against — so staleness is exact, and survives commits and rebases.
+
+## Install
+
+```bash
+pipx install git+https://github.com/scodge-24/slice-cli      # isolated, gives you `slice`
+# or, for development:
+git clone https://github.com/scodge-24/slice-cli && cd slice-cli
+pip install -e .
+```
+
+Requires Python 3.10+ and `git` on PATH.
+
+## 60-second tour
+
+This repo ships a self-contained demo under `examples/mock-repo/`. Point `slice`
+at it with `--repo`:
+
+```bash
+$ slice --repo examples/mock-repo affected-docs src/auth/middleware.py
+[STALE] auth-guide  (auth-guide.md)  [auth-service]
+  - examples/mock-repo/src/auth/middleware.py
+  - examples/mock-repo/src/auth/sessions.py
+```
+
+That's the core loop: you changed a file, and `slice` tells you exactly which doc
+to review. Orient before editing with one command:
+
+```bash
+$ slice --repo examples/mock-repo context src/auth/middleware.py
+slice: auth-service
+description: Authentication and session management
+files: src/auth/middleware.py, src/auth/sessions.py
+linked docs:
+  [STALE] auth-guide  (auth-guide.md)
+System Behavior:
+Every protected request passes through `require_auth`...
+Runtime Flows:
+request -> require_auth -> verify_token -> get_session -> handler
+...
+```
+
+When a doc is back in sync, mark it verified:
+
+```bash
+$ slice --repo examples/mock-repo stamp auth-guide
+stamped auth-guide -> 5fb503f...
+```
+
+> `examples/` is **sample data** — a mock repo for the tool to operate on, not
+> documentation about `slice` itself.
+
+## Core commands
+
+| Command | What it does |
+|---------|--------------|
+| `slice context <path>` | Owning slice + system context + stale linked docs for a file |
+| `slice affected-docs <files…>` | Which docs a set of changed files may have made stale |
+| `slice stale-docs` | Everything currently stale (exit 1 if any — handy as a CI gate) |
+| `slice stamp <doc>` | Mark a doc verified against current code |
+| `slice list` / `show` / `for` / `find` / `deps` | Navigate slices |
+| `slice check` | Integrity + staleness checks |
+| `slice init` | Wire `slice` into your repo (agent instructions, optional hook/CI) |
+
+Run `slice <command> -h` for examples and flags.
+
+## Use it in your own repo
+
+```bash
+slice init            # writes agent instructions into CLAUDE.md / AGENTS.md
+slice init --hook     # + a pre-commit staleness reminder
+slice init --ci       # + a GitHub Actions staleness check
+```
+
+`slice init` is idempotent and re-runnable. You write slice files under `slices/`
+and a `DOCS.yaml` manifest mapping docs to slices; see
+[`design/`](design/) for architecture, the manifest schema, and the migration guide.
+
+## Docs
+
+- [`design/architecture.md`](design/architecture.md) — how it works
+- [`design/manifest-schema.md`](design/manifest-schema.md) — `DOCS.yaml` reference
+- [`design/agent-workflows.md`](design/agent-workflows.md) — agent usage patterns
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup and conventions
+
+## License
+
+MIT — see [LICENSE](LICENSE).

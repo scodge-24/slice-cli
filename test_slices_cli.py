@@ -286,6 +286,50 @@ class TestDocDrift:
         assert len(drifted) == 1
         assert "api-handlers" in drifted[0].affected_slices
 
+    def test_fingerprint_drift_narrows_changed_files(self, repo: Path, ctx: cli.Ctx):
+        # A fingerprinted doc that drifts reports only the files that actually
+        # changed — not its whole tracked set (matching the legacy SHA branch).
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return 0\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit middleware"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = next(d for d in cli.check_doc_drift(manifest.docs, slices, ctx)
+                     if d.doc_id == "auth-guide")
+        assert "src/auth/middleware.py" in drift.changed_files
+        assert "src/auth/sessions.py" not in drift.changed_files
+
+
+# ---------------------------------------------------------------------------
+# Glob expansion
+# ---------------------------------------------------------------------------
+
+class TestGlobExpansion:
+    def test_glob_expands_to_matching_files(self, repo: Path):
+        names = {p.name for p in cli._expand_glob("src/auth/*.py", repo)}
+        assert names == {"middleware.py", "sessions.py"}
+
+    def test_literal_filename_with_metachars_resolves(self, repo: Path):
+        # A real file whose name contains glob metacharacters (e.g. a Next.js
+        # route file) must resolve to itself, not be dropped as a non-matching glob.
+        route = repo / "app" / "[id]"
+        route.mkdir(parents=True)
+        target = route / "page.tsx"
+        target.write_text("export default Page\n")
+        assert cli._expand_glob("app/[id]/page.tsx", repo) == [target.resolve()]
+
+    def test_metachar_file_edits_are_fingerprinted(self, repo: Path, ctx: cli.Ctx):
+        route = repo / "app" / "[id]"
+        route.mkdir(parents=True)
+        (route / "page.tsx").write_text("v1\n")
+        fp1 = cli._content_fingerprint(
+            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        (route / "page.tsx").write_text("v2\n")
+        fp2 = cli._content_fingerprint(
+            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        assert fp1 != fp2  # the edit is visible to staleness tracking
+
 
 # ---------------------------------------------------------------------------
 # Include/exclude
@@ -372,6 +416,58 @@ class TestStamp:
         auth = next(td for td in manifest.docs if td.doc_id == "auth-guide")
         assert "auth" in auth.tags
 
+    def test_stamp_records_fingerprint(self, repo: Path, ctx: cli.Ctx):
+        cli.main(["--repo", str(repo), "stamp", "auth-guide"])
+        manifest = cli.load_doc_manifest(ctx)
+        auth = next(td for td in manifest.docs if td.doc_id == "auth-guide")
+        assert len(auth.fingerprint) == 64  # sha256 hex
+
+    def test_stamp_dirty_tree_now_allowed(self, repo: Path, ctx: cli.Ctx):
+        # The dirty-guard is gone: stamping uncommitted content is correct and
+        # records a fingerprint of exactly that content.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return None\n")
+        rc = cli.main(["--repo", str(repo), "stamp", "auth-guide"])
+        assert rc == 0
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_edit_stamp_commit_not_stale(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION: the exact sequencing the git-SHA anchor broke.
+        # Edit a tracked source, stamp while dirty, then commit -> NOT stale.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return True\n")
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit auth"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_rebase_after_stamp_not_stale(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION: rewriting history makes the stamped SHA vanish. The
+        # fingerprint survives because file contents are unchanged.
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        subprocess.run(["git", "commit", "--amend", "-m", "reworded", "--allow-empty"],
+                       cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert all(d.doc_id != "auth-guide" for d in drift)
+
+    def test_legacy_sha_fallback_flags_drift(self, repo: Path, ctx: cli.Ctx):
+        # A manifest entry with verified_at but no fingerprint (the fixture)
+        # still gets evaluated via the SHA-diff fallback.
+        (repo / "src" / "api" / "handlers.py").write_text("def get_user():\n    return 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit api"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = cli.check_doc_drift(manifest.docs, slices, ctx)
+        assert any(d.doc_id == "api-ref" for d in drift)
+        assert all(td.fingerprint == "" for td in manifest.docs)  # none migrated yet
+
     def test_stamp_no_manifest(self, repo: Path):
         (repo / "slices" / "DOCS.yaml").unlink()
         rc = cli.main(["--repo", str(repo), "stamp", "auth-guide"])
@@ -425,6 +521,39 @@ class TestCheck:
         docs = cli.load_slice_docs(ctx)
         result = cli.run_check(docs, ctx, staleness=False)
         assert result.ok  # No manifest = no doc checks, not an error
+
+    def test_source_fingerprint_tracks_dirty_slice_sources(self, repo: Path, ctx: cli.Ctx):
+        docs = cli.load_slice_docs(ctx)
+        clean = ctx.source_fingerprint(docs)
+        assert len(clean) == 64  # content hash, clean or dirty
+
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
+        dirty = ctx.source_fingerprint(docs)
+        assert dirty != clean
+        assert len(dirty) == 64
+
+    def test_index_fingerprint_stable_across_dirty_then_commit(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION (review): sync while dirty, then commit the same content.
+        # INDEX must NOT report stale afterward — the content hash is unchanged.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return 1\n")
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit"], cwd=repo, capture_output=True, check=True)
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in w for w in cli.run_check(docs, ctx).warnings)
+
+    def test_staleness_uses_source_fingerprint_for_dirty_worktree(self, repo: Path, ctx: cli.Ctx):
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
+
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
+        docs = cli.load_slice_docs(ctx)
+        assert any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
+
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
 
     def test_doc_id_frontmatter_mismatch_is_error(self, ctx: cli.Ctx):
         # manifest key says "auth-guide" but doc frontmatter says "wrong-id"
@@ -536,7 +665,7 @@ class TestAffectedDocs:
 
     def test_finds_linked_docs_when_current(self, repo: Path, capsys):
         rc = cli.main(["--repo", str(repo), "affected-docs", "src/auth/middleware.py", "--json"])
-        assert rc == 1  # found docs (even if not stale — file maps to a tracked doc)
+        assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert len(data) == 1
         assert data[0]["doc_id"] == "auth-guide"
@@ -567,3 +696,403 @@ class TestAffectedDocs:
         doc_ids = {d["doc_id"] for d in data}
         assert "auth-guide" in doc_ids
         assert "api-ref" in doc_ids
+
+
+# ---------------------------------------------------------------------------
+# Slice-context feature: section extraction, `show` flags, `slice context`
+# ---------------------------------------------------------------------------
+
+_SECTION_BODY = textwrap.dedent("""\
+    Intro prose about the auth slice.
+
+    ## System Behavior
+    Verifies JWTs and manages in-memory sessions.
+
+    ## Invariants
+    Tokens expire after one hour.
+
+    ## Runtime Flows
+    request -> verify_token -> session lookup -> handler
+
+    ## Verification
+    Run: pytest tests/test_auth.py
+
+    ## Update Triggers
+    When middleware.py or sessions.py change.
+""")
+
+
+def _add_sections(repo: Path) -> None:
+    """Rewrite the auth-service slice body with standard system sections."""
+    p = repo / "slices" / "auth-service.md"
+    fm = textwrap.dedent("""\
+        ---
+        slice_id: auth-service
+        description: Auth and sessions
+        loc: 30
+        files:
+          - src/auth/middleware.py
+          - src/auth/sessions.py
+        dependencies: []
+        ---
+        """)
+    p.write_text(fm + _SECTION_BODY)
+
+
+def _add_second_owner(repo: Path) -> None:
+    """Add a second slice that also owns middleware.py (ambiguous ownership)."""
+    (repo / "slices" / "auth-extra.md").write_text(textwrap.dedent("""\
+        ---
+        slice_id: auth-extra
+        description: Extra auth view
+        loc: 5
+        files:
+          - src/auth/middleware.py
+        dependencies: []
+        ---
+        Extra slice body.
+    """))
+
+
+class TestSectionExtraction:
+    def test_extract_parses_h2_headings(self):
+        sections = cli.extract_sections(_SECTION_BODY)
+        assert sections["System Behavior"].startswith("Verifies JWTs")
+        assert "session lookup" in sections["Runtime Flows"]
+        assert "pytest" in sections["Verification"]
+
+    def test_extract_ignores_h3_as_delimiter(self):
+        body = "## Runtime Flows\nstep one\n### sub\ndetail\n"
+        sections = cli.extract_sections(body)
+        assert list(sections) == ["Runtime Flows"]
+        assert "### sub" in sections["Runtime Flows"]
+
+    def test_extract_empty_without_headings(self):
+        assert cli.extract_sections("just prose, no headings") == {}
+
+
+class TestShowSections:
+    def test_show_body_includes_full_body(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--body"]) == 0
+        out = capsys.readouterr().out
+        assert "## System Behavior" in out
+        assert "Intro prose" in out
+
+    def test_show_system_only_standard_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system"]) == 0
+        out = capsys.readouterr().out
+        assert "System Behavior:" in out
+        assert "Update Triggers:" in out
+        # metadata fields should NOT appear in section mode
+        assert "doc_path:" not in out
+
+    def test_show_call_stacks_only_runtime_flows(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--call-stacks"]) == 0
+        out = capsys.readouterr().out
+        assert "Runtime Flows:" in out
+        assert "System Behavior:" not in out
+
+    def test_show_verification_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--verification"]) == 0
+        out = capsys.readouterr().out
+        assert "Verification:" in out
+        assert "Update Triggers:" in out
+        assert "Runtime Flows:" not in out
+
+    def test_show_missing_section_does_not_fail(self, repo: Path, capsys):
+        # default fixture body has no standard sections
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system"]) == 0
+        assert "(not present)" in capsys.readouterr().out
+
+    def test_show_json_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["slice_id"] == "auth-service"
+        assert "Runtime Flows" in data["sections"]
+
+    def test_plain_show_unchanged(self, repo: Path, capsys):
+        # backward compat: no flags -> metadata output with doc_path
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["doc_path"].endswith("auth-service.md")
+        assert "sections" not in data
+
+
+class TestContext:
+    def test_context_by_file_resolves_slice(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"]) == 0
+        out = capsys.readouterr().out
+        assert "slice: auth-service" in out
+
+    def test_context_by_slice_json_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "context", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert len(data["slices"]) == 1
+        s = data["slices"][0]
+        assert s["slice_id"] == "auth-service"
+        assert "Runtime Flows" in s["sections"]
+        assert s["docs"][0]["doc_id"] == "auth-guide"
+
+    def test_context_missing_sections_ok(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "context", "auth-service"]) == 0
+        assert "(not present)" in capsys.readouterr().out
+
+    def test_context_no_owner_fails(self, repo: Path, capsys):
+        rc = cli.main(["--repo", str(repo), "context", "src/nope/missing.py"])
+        assert rc == 1
+        assert "no owning slice" in capsys.readouterr().err
+
+    def test_context_strict_ambiguous_fails(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "ambiguous" in err
+        assert "auth-extra" in err and "auth-service" in err
+
+
+class TestContextConfig:
+    def test_missing_config_defaults_strict(self, repo: Path):
+        _add_second_owner(repo)
+        # no config.yaml -> strict -> ambiguous file errors
+        assert cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"]) == 1
+
+    def test_config_best_effort_allows_multi_owner(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: best_effort\n")
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        ids = {s["slice_id"] for s in data["slices"]}
+        assert ids == {"auth-extra", "auth-service"}
+
+    def test_cli_strict_overrides_best_effort_config(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: best_effort\n")
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py", "--strict"])
+        assert rc == 1
+        assert "ambiguous" in capsys.readouterr().err
+
+    def test_invalid_config_value_fails(self, repo: Path, capsys):
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: loose\n")
+        rc = cli.main(["--repo", str(repo), "context", "auth-service"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "loose" in err
+        assert "strict" in err and "best_effort" in err
+        assert "config.yaml" in err
+
+
+class TestContextHelp:
+    def test_help_advertises_context(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["--help"])
+        assert "context" in capsys.readouterr().out
+
+    def test_context_help_has_examples(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["context", "--help"])
+        out = capsys.readouterr().out
+        assert "examples:" in out
+        assert "slice context" in out
+        assert "best-effort" in out
+
+    def test_show_help_has_section_flags(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["show", "--help"])
+        out = capsys.readouterr().out
+        assert "--call-stacks" in out
+        assert "--verification" in out
+
+
+# ---------------------------------------------------------------------------
+# Robustness: graceful errors, not-a-repo, env vars
+# ---------------------------------------------------------------------------
+
+class TestRobustness:
+    def test_malformed_docs_yaml_exits_2(self, repo: Path, capsys):
+        (repo / "slices" / "DOCS.yaml").write_text("docs: [1, 2, 3\nvault_root: ../docs\n")
+        rc = cli.main(["--repo", str(repo), "stale-docs"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "failed to parse" in err
+        assert "DOCS.yaml" in err
+        assert "Traceback" not in err
+
+    def test_malformed_slice_frontmatter_exits_2(self, repo: Path, capsys):
+        (repo / "slices" / "auth-service.md").write_text(
+            "---\nslice_id: [unclosed\n---\nbody\n"
+        )
+        rc = cli.main(["--repo", str(repo), "list"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "failed to parse" in err
+        assert "auth-service.md" in err
+
+    def test_not_a_git_repo_exits_2(self, tmp_path: Path, capsys, monkeypatch):
+        # No --repo, no SLICES_REPO_ROOT, cwd is not a git repo.
+        monkeypatch.delenv("SLICES_REPO_ROOT", raising=False)
+        monkeypatch.delenv("SLICES_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        rc = cli.main(["list"])
+        assert rc == 2
+        assert "git repository" in capsys.readouterr().err
+
+    def test_env_var_repo_root(self, repo: Path, tmp_path_factory, capsys, monkeypatch):
+        # SLICES_REPO_ROOT fallback when --repo is omitted.
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("SLICES_REPO_ROOT", str(repo))
+        monkeypatch.delenv("SLICES_DIR", raising=False)
+        assert cli.main(["list"]) == 0
+        assert "auth-service" in capsys.readouterr().out
+
+    def test_stale_docs_help_documents_exit_codes(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["stale-docs", "--help"])
+        out = capsys.readouterr().out
+        assert "exit codes:" in out
+        assert "stale" in out
+
+
+# ---------------------------------------------------------------------------
+# slice init — repo adoption
+# ---------------------------------------------------------------------------
+
+class TestInit:
+    def test_init_writes_agent_block(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init"]) == 0
+        text = (repo / "CLAUDE.md").read_text()
+        assert "<!-- slice-cli:start -->" in text
+        assert "<!-- slice-cli:end -->" in text
+        assert "slice context" in text
+
+    def test_init_idempotent(self, repo: Path):
+        cli.main(["--repo", str(repo), "init"])
+        cli.main(["--repo", str(repo), "init"])
+        text = (repo / "CLAUDE.md").read_text()
+        assert text.count("<!-- slice-cli:start -->") == 1
+        assert text.count("<!-- slice-cli:end -->") == 1
+
+    def test_init_preserves_existing_claudemd(self, repo: Path):
+        (repo / "CLAUDE.md").write_text("# My Project\n\nExisting instructions.\n")
+        cli.main(["--repo", str(repo), "init"])
+        text = (repo / "CLAUDE.md").read_text()
+        assert "Existing instructions." in text
+        assert "<!-- slice-cli:start -->" in text
+
+    def test_init_hook(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init", "--hook"]) == 0
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        assert hook.exists()
+        assert "stale-docs" in hook.read_text()
+        import os
+        assert os.access(hook, os.X_OK)
+
+    def test_init_ci(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init", "--ci"]) == 0
+        wf = repo / ".github" / "workflows" / "slice-staleness.yml"
+        assert wf.exists()
+        assert "slice staleness" in wf.read_text()
+
+    def test_init_dry_run_writes_nothing(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "init", "--dry-run"]) == 0
+        assert not (repo / "CLAUDE.md").exists()
+        assert "would write" in capsys.readouterr().out
+
+    def test_init_updates_agents_md_when_present(self, repo: Path):
+        (repo / "AGENTS.md").write_text("# Agents\n")
+        cli.main(["--repo", str(repo), "init"])
+        assert "<!-- slice-cli:start -->" in (repo / "AGENTS.md").read_text()
+        assert "<!-- slice-cli:start -->" in (repo / "CLAUDE.md").read_text()
+
+    def test_init_help_examples(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["init", "--help"])
+        out = capsys.readouterr().out
+        assert "examples:" in out
+        assert "--hook" in out and "--ci" in out
+
+
+# ---------------------------------------------------------------------------
+# Command coverage: docs-bootstrap, files, deps, grep, transitive/circular
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil
+
+
+class TestDocsBootstrap:
+    def test_generates_manifest_from_tracks(self, repo: Path, ctx: cli.Ctx):
+        (repo / "slices" / "DOCS.yaml").unlink()
+        vault = repo / "vault"
+        vault.mkdir()
+        (vault / "guide.md").write_text(
+            "---\ndoc_id: guide\ntracks:\n  - src/auth/middleware.py\n---\n# Guide\n"
+        )
+        rc = cli.main(["--repo", str(repo), "docs-bootstrap", str(vault)])
+        assert rc == 0
+        manifest = cli.load_doc_manifest(ctx)
+        guide = next(td for td in manifest.docs if td.doc_id == "guide")
+        assert "auth-service" in guide.slices
+
+    def test_dry_run_writes_nothing(self, repo: Path):
+        (repo / "slices" / "DOCS.yaml").unlink()
+        vault = repo / "vault"
+        vault.mkdir()
+        (vault / "guide.md").write_text("---\ndoc_id: guide\ntracks: [src/auth/middleware.py]\n---\n#\n")
+        rc = cli.main(["--repo", str(repo), "docs-bootstrap", str(vault), "--dry-run"])
+        assert rc == 0
+        assert not (repo / "slices" / "DOCS.yaml").exists()
+
+
+class TestCommandCoverage:
+    def test_files(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "files", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "src/auth/middleware.py" in data
+
+    def test_deps_direct(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "api-handlers", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dependencies"] == ["auth-service"]
+
+    def test_deps_reverse(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "auth-service", "--reverse", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "api-handlers" in data["dependencies"]
+
+    def test_deps_transitive(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "api-handlers", "--transitive", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "auth-service" in data["dependencies"]
+
+    def test_deps_transitive_handles_cycle(self, repo: Path, capsys):
+        # A -> B -> A must terminate, not hang or crash.
+        slices = repo / "slices"
+        (slices / "cyc-a.md").write_text(
+            "---\nslice_id: cyc-a\ndescription: A\nfiles: []\ndependencies: [cyc-b]\n---\nA\n"
+        )
+        (slices / "cyc-b.md").write_text(
+            "---\nslice_id: cyc-b\ndescription: B\nfiles: []\ndependencies: [cyc-a]\n---\nB\n"
+        )
+        assert cli.main(["--repo", str(repo), "deps", "cyc-a", "--transitive", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "cyc-b" in data["dependencies"]
+
+    @pytest.mark.skipif(_shutil.which("rg") is None, reason="ripgrep not installed")
+    def test_grep(self, repo: Path):
+        # verify_token is defined in src/auth/middleware.py (owned by auth-service)
+        rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
+        assert rc == 0
+
+    def test_grep_without_rg_is_graceful(self, repo: Path, monkeypatch, capsys):
+        monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+        rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
+        assert rc == 2
+        assert "rg is required" in capsys.readouterr().err

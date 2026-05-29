@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import glob as globmod
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,15 @@ class Ctx:
         except (OSError, subprocess.CalledProcessError):
             return "unknown"
 
+    def source_fingerprint(self, docs: list[SliceDoc]) -> str:
+        # Content hash of every slice source (slice .md files + their tracked
+        # files), read from the working tree. Identical in clean and dirty
+        # states, so INDEX staleness reflects uncommitted edits AND stays stable
+        # across a sync-while-dirty -> commit flow (the committed contents hash
+        # the same). Shares the primitive with doc-staleness fingerprints.
+        paths = list(_slice_source_paths(docs, self))
+        return _content_fingerprint(paths, self.repo_root)
+
     def rel(self, path: Path) -> str:
         try:
             return str(path.relative_to(self.repo_root))
@@ -126,10 +136,11 @@ class TrackedDoc:
     doc_id: str          # manifest key — stable identifier from doc frontmatter
     path: str            # relative to vault_root
     slices: tuple[str, ...]
-    verified_at: str
+    verified_at: str     # HEAD short-SHA at stamp time — human-readable note only
     tags: tuple[str, ...]
     include: tuple[str, ...]   # optional: narrow to specific files within slices
     exclude: tuple[str, ...]   # optional: exclude specific files/globs
+    fingerprint: str = ""      # content hash of tracked files at stamp time (staleness anchor)
 
 
 @dataclass
@@ -162,6 +173,18 @@ def _string_list(raw: Any) -> tuple[str, ...]:
     return (str(raw).strip(),) if str(raw).strip() else ()
 
 
+def _parse_yaml(text: str, source: str) -> Any:
+    """yaml.safe_load with a clean, sourced error instead of a raw traceback.
+
+    Raises ValueError (caught by main() -> exit 2) naming the offending file.
+    """
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        detail = str(exc).replace("\n", " ")
+        raise ValueError(f"failed to parse {source}: {detail}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Loading — slices
 # ---------------------------------------------------------------------------
@@ -179,7 +202,7 @@ def load_slice_docs(ctx: Ctx) -> list[SliceDoc]:
         match = FRONTMATTER_RE.match(content)
         if not match:
             raise ValueError(f"{ctx.rel(doc_path)}: missing YAML frontmatter")
-        frontmatter = yaml.safe_load(match.group(1))
+        frontmatter = _parse_yaml(match.group(1), ctx.rel(doc_path))
         if not isinstance(frontmatter, dict):
             raise ValueError(f"{ctx.rel(doc_path)}: invalid YAML frontmatter")
         body = content[match.end():].strip()
@@ -213,7 +236,7 @@ def load_doc_manifest(ctx: Ctx) -> DocManifest:
     if not manifest_path.exists():
         return DocManifest(vault_root_raw=None, docs=[])
 
-    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw = _parse_yaml(manifest_path.read_text(encoding="utf-8"), ctx.rel(manifest_path))
     if not isinstance(raw, dict):
         return DocManifest(vault_root_raw=None, docs=[])
 
@@ -235,6 +258,7 @@ def load_doc_manifest(ctx: Ctx) -> DocManifest:
             tags=_string_list(entry.get("tags")),
             include=_string_list(entry.get("include")),
             exclude=_string_list(entry.get("exclude")),
+            fingerprint=str(entry.get("fingerprint", "")).strip(),
         ))
     return DocManifest(vault_root_raw=vault_root_raw, docs=tracked)
 
@@ -248,6 +272,8 @@ def _save_doc_manifest(manifest: DocManifest, ctx: Ctx) -> None:
             "slices": list(td.slices),
             "verified_at": td.verified_at,
         }
+        if td.fingerprint:
+            entry["fingerprint"] = td.fingerprint
         if td.tags:
             entry["tags"] = list(td.tags)
         if td.include:
@@ -314,6 +340,97 @@ def _transitive_deps(start: str, adj: dict[str, tuple[str, ...]]) -> list[str]:
     return ordered
 
 
+# ---------------------------------------------------------------------------
+# Slice body sections (system context)
+# ---------------------------------------------------------------------------
+
+# Standard level-2 headings that hold durable system context in a slice body.
+STANDARD_SECTIONS: tuple[str, ...] = (
+    "System Behavior",
+    "Invariants",
+    "Runtime Flows",
+    "Verification",
+    "Update Triggers",
+)
+
+_H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$")
+
+
+def extract_sections(body: str) -> dict[str, str]:
+    """Parse level-2 (`## `) Markdown headings from a slice body.
+
+    Returns {heading: text} with outer blank lines trimmed. Deeper headings
+    (`###` and beyond) are ignored as section delimiters and stay in the text
+    of the section they fall under. Returns {} when no `## ` headings exist.
+    """
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in body.splitlines():
+        m = _H2_RE.match(line)
+        if m:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip("\n")
+            current = m.group(1).strip()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip("\n")
+    return sections
+
+
+def _section_text(sections: dict[str, str], name: str) -> str:
+    """Case-insensitive lookup of a section by standard name. '' if absent."""
+    target = name.lower()
+    for heading, text in sections.items():
+        if heading.lower() == target:
+            return text
+    return ""
+
+
+def _present_sections(sections: dict[str, str], names: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """{name: text} for each requested standard section that is present."""
+    return {n: t for n in names if (t := _section_text(sections, n))}
+
+
+# ---------------------------------------------------------------------------
+# Config — slices/config.yaml
+# ---------------------------------------------------------------------------
+
+_AMBIGUITY_VALUES = ("strict", "best_effort")
+
+
+@dataclass(frozen=True)
+class SliceConfig:
+    """Contents of slices/config.yaml. Missing file defaults to strict."""
+    ambiguity: str = "strict"
+
+
+def load_config(ctx: Ctx) -> SliceConfig:
+    """Load slices/config.yaml. Absent file -> strict defaults.
+
+    Raises ValueError on an invalid context.ambiguity value, naming the bad
+    value, the allowed values, and the config path.
+    """
+    path = ctx.slices_dir / "config.yaml"
+    if not path.exists():
+        return SliceConfig()
+    raw = _parse_yaml(path.read_text(encoding="utf-8"), ctx.rel(path))
+    if not isinstance(raw, dict):
+        return SliceConfig()
+    context = raw.get("context")
+    if not isinstance(context, dict):
+        return SliceConfig()
+    ambiguity = str(context.get("ambiguity", "strict")).strip() or "strict"
+    if ambiguity not in _AMBIGUITY_VALUES:
+        raise ValueError(
+            f"invalid context.ambiguity '{ambiguity}' in {ctx.rel(path)}; "
+            f"allowed: {', '.join(_AMBIGUITY_VALUES)}"
+        )
+    return SliceConfig(ambiguity=ambiguity)
+
+
 def _owners_for_path(docs: list[SliceDoc], raw_path: str, ctx: Ctx) -> list[SliceDoc]:
     normalized = _normalize_repo_path(raw_path, ctx)
     owners = []
@@ -365,9 +482,21 @@ def _find_matches(
     return matches
 
 
+def _is_glob(pattern: str) -> bool:
+    """True if the path spec contains shell-glob metacharacters."""
+    return any(c in pattern for c in ("*", "?", "["))
+
+
 def _expand_glob(pattern: str, root: Path) -> list[Path]:
-    if any(c in pattern for c in ("*", "?", "[")):
-        return sorted(Path(m).resolve() for m in globmod.glob(str(root / pattern), recursive=True))
+    if _is_glob(pattern):
+        matches = sorted(Path(m).resolve() for m in globmod.glob(str(root / pattern), recursive=True))
+        if matches:
+            return matches
+        # A real file may legitimately contain glob metacharacters in its name
+        # (e.g. a Next.js route file `app/[id]/page.tsx`). If the pattern matched
+        # nothing but names an existing file, treat it as that literal file.
+        literal = (root / pattern).resolve()
+        return [literal] if literal.is_file() else []
     resolved = (root / pattern).resolve()
     return [resolved] if resolved.exists() else []
 
@@ -396,6 +525,28 @@ def _parse_index(ctx: Ctx) -> tuple[dict[str, dict[str, Any]], list[str]]:
     return rows, order
 
 
+def _resolve_raw_path(raw: str, ctx: Ctx) -> set[str]:
+    """Resolve one tracked-path spec to repo-relative file paths.
+
+    Globs expand to their matching files; a plain path normalizes as-is (kept
+    even if absent, so a deletion still changes a fingerprint). Shared by INDEX
+    source fingerprinting and per-doc staleness anchoring so both agree on
+    exactly which files back a verification.
+    """
+    if _is_glob(raw):
+        return {ctx.rel(p) for p in _expand_glob(raw, ctx.repo_root) if p.is_file()}
+    return {_normalize_repo_path(raw, ctx)}
+
+
+def _slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> set[str]:
+    paths: set[str] = set()
+    for doc in docs:
+        paths.add(ctx.rel(doc.doc_path))
+        for raw_path in doc.files:
+            paths |= _resolve_raw_path(raw_path, ctx)
+    return paths
+
+
 def _generate_index(docs: list[SliceDoc], ctx: Ctx) -> str:
     _, current_order = _parse_index(ctx)
     by_id = _slice_map(docs)
@@ -416,6 +567,7 @@ def _generate_index(docs: list[SliceDoc], ctx: Ctx) -> str:
         "# Slice Index",
         "",
         f"Last updated: {ctx.head_sha()}",
+        f"Source fingerprint: {ctx.source_fingerprint(docs)}",
         "",
         "| Slice ID | Description | LoC |",
         "|----------|-------------|-----|",
@@ -466,6 +618,42 @@ def _resolve_tracked_files(
     ]
 
 
+def _resolve_tracked_concrete_files(
+    td: TrackedDoc,
+    by_id: dict[str, SliceDoc],
+    ctx: Ctx,
+) -> list[str]:
+    """Resolve a TrackedDoc to concrete repo-relative files, expanding globs.
+
+    This is the deterministic input to a doc's content fingerprint, so `stamp`
+    and `check` agree on exactly which files back a verification.
+    """
+    out: set[str] = set()
+    for raw in _resolve_tracked_files(td, by_id):
+        out |= _resolve_raw_path(raw, ctx)
+    return sorted(out)
+
+
+def _content_fingerprint(rel_paths: list[str], repo_root: Path) -> str:
+    """Deterministic, order-independent SHA-256 of the given files' contents.
+
+    Missing files hash as a stable sentinel so deletions still change the
+    digest. Shared by INDEX source fingerprinting and doc-staleness anchoring.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"slice-content-v1\0")
+    for rel in sorted(set(rel_paths)):
+        digest.update(rel.encode())
+        digest.update(b"\0")
+        path = repo_root / rel
+        if path.is_file():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"<deleted>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _resolve_track_to_slice_ids(
     track: str, slices: list[SliceDoc], ctx: Ctx
 ) -> list[str]:
@@ -494,6 +682,41 @@ def _resolve_track_to_slice_ids(
     return sorted(slice_ids)
 
 
+def _affected_slices(
+    changed: set[str], linked_slices: list[str], by_id: dict[str, SliceDoc]
+) -> list[str]:
+    """Subset of linked slices whose files actually changed."""
+    affected = []
+    for sid in linked_slices:
+        s = by_id.get(sid)
+        if s and any(
+            c == f or fnmatch.fnmatch(c, f)
+            for c in changed for f in s.files
+        ):
+            affected.append(sid)
+    return affected
+
+
+def _git_changed_files(files: list[str], verified_at: str, ctx: Ctx) -> set[str]:
+    """Files among `files` changed since verified_at (committed) or in the
+    working tree. Best-effort — empty if git cannot resolve the range."""
+    changed: set[str] = set()
+    if verified_at:
+        try:
+            proc = ctx.git("diff", "--name-only", f"{verified_at}..HEAD",
+                           "--", *files, check=False)
+            if proc.returncode == 0:
+                changed.update(l.strip() for l in proc.stdout.splitlines() if l.strip())
+        except (OSError, FileNotFoundError):
+            pass
+    try:
+        wt = ctx.git("diff", "--name-only", "HEAD", "--", *files, check=False)
+        changed.update(l.strip() for l in wt.stdout.splitlines() if l.strip())
+    except (OSError, FileNotFoundError):
+        pass
+    return changed
+
+
 def check_doc_drift(
     tracked_docs: list[TrackedDoc],
     slices: list[SliceDoc],
@@ -510,6 +733,27 @@ def check_doc_drift(
 
         # Resolve which slices are actually linked
         linked_slices = [sid for sid in td.slices if sid in by_id]
+
+        # Fingerprint anchor (preferred): compare the current content hash of the
+        # tracked files against the hash recorded at stamp time. Independent of
+        # git history, so it survives rebases and the edit->stamp->commit order.
+        # Legacy entries without a fingerprint fall through to the SHA-diff below.
+        if td.fingerprint:
+            concrete = _resolve_tracked_concrete_files(td, by_id, ctx)
+            if _content_fingerprint(concrete, ctx.repo_root) != td.fingerprint:
+                # The fingerprint is the staleness gate; narrow the report to the
+                # files git says changed (matching the legacy branch and the
+                # documented JSON shape), falling back to the full tracked set
+                # when git cannot attribute the change.
+                changed = _git_changed_files(files, td.verified_at, ctx)
+                drifted.append(DocDrift(
+                    doc_id=td.doc_id,
+                    path=td.path,
+                    verified_at=td.verified_at or "(never)",
+                    affected_slices=_affected_slices(changed, linked_slices, by_id) or linked_slices,
+                    changed_files=sorted(changed) if changed else concrete,
+                ))
+            continue
 
         if not td.verified_at:
             # Never verified — always stale
@@ -554,21 +798,11 @@ def check_doc_drift(
             pass
 
         if changed:
-            # Determine which slices are actually affected
-            affected = []
-            for sid in linked_slices:
-                s = by_id.get(sid)
-                if s and any(
-                    c == f or fnmatch.fnmatch(c, f)
-                    for c in changed for f in s.files
-                ):
-                    affected.append(sid)
-
             drifted.append(DocDrift(
                 doc_id=td.doc_id,
                 path=td.path,
                 verified_at=td.verified_at,
-                affected_slices=affected or linked_slices,
+                affected_slices=_affected_slices(changed, linked_slices, by_id) or linked_slices,
                 changed_files=sorted(changed),
             ))
 
@@ -581,6 +815,22 @@ def _docs_for_slice(
 ) -> list[TrackedDoc]:
     """Reverse lookup: which manifest docs reference this slice?"""
     return [td for td in tracked_docs if slice_id in td.slices]
+
+
+def _fingerprint_equal(recorded: str, current: str) -> bool:
+    """Compare two INDEX fingerprints like-for-like.
+
+    Two git SHAs (<=40 hex) may differ only in short-vs-full length, so they
+    match on the shared prefix. A 64-char content digest must match exactly —
+    never prefix-match a SHA against a digest (the old bug, which could both
+    false-positive and, worse, false-negative).
+    """
+    if recorded == current:
+        return True
+    if len(recorded) <= 40 and len(current) <= 40:
+        n = min(len(recorded), len(current))
+        return n > 0 and recorded[:n] == current[:n]
+    return False
 
 
 def _frontmatter_doc_id(doc_path: Path) -> str | None:
@@ -659,7 +909,7 @@ def run_check(
 
         # File path existence (with glob support)
         for raw_path in d.files:
-            if any(c in raw_path for c in ("*", "?", "[")):
+            if _is_glob(raw_path):
                 if not globmod.glob(str(root / raw_path), recursive=True):
                     result.errors.append(f"{ctx.rel(d.doc_path)}: glob matches nothing: {raw_path}")
             else:
@@ -721,15 +971,17 @@ def run_check(
     if staleness and ctx.index_path.is_file():
         content = ctx.index_path.read_text(encoding="utf-8")
         sha_match = re.search(r"Last updated:\s*([0-9a-fA-F]+)", content)
+        fingerprint_match = re.search(r"Source fingerprint:\s*([0-9a-fA-F]+)", content)
         if not sha_match:
             result.warnings.append("INDEX.md has no 'Last updated: <hash>' line")
-        else:
-            index_hash = sha_match.group(1).strip()
-            head = ctx.head_sha()
-            min_len = min(len(index_hash), len(head))
-            if head[:min_len] != index_hash[:min_len]:
+        recorded = fingerprint_match.group(1).strip() if fingerprint_match else None
+        if recorded is None and sha_match:
+            recorded = sha_match.group(1).strip()
+        if recorded is not None:
+            current = ctx.source_fingerprint(docs)
+            if not _fingerprint_equal(recorded, current):
                 result.warnings.append(
-                    f"INDEX.md stale: recorded {index_hash[:12]}, HEAD is {head[:12]}"
+                    f"INDEX.md stale: recorded {recorded[:12]}, source fingerprint is {current[:12]}"
                 )
 
     # --- Staged source coverage ---
@@ -748,7 +1000,7 @@ def run_check(
             glob_patterns: list[str] = []
             for d in docs:
                 for raw_path in d.files:
-                    if any(c in raw_path for c in ("*", "?", "[")):
+                    if _is_glob(raw_path):
                         glob_patterns.append(raw_path)
                         for resolved in _expand_glob(raw_path, root):
                             if resolved.is_file():
@@ -832,8 +1084,46 @@ def cmd_list(args: argparse.Namespace, ctx: Ctx) -> int:
     return 0
 
 
+def _requested_section_names(args: argparse.Namespace) -> list[str]:
+    """Ordered, de-duplicated standard sections requested by show flags."""
+    names: list[str] = []
+    if getattr(args, "system", False):
+        names.extend(STANDARD_SECTIONS)
+    if getattr(args, "call_stacks", False):
+        names.append("Runtime Flows")
+    if getattr(args, "verification", False):
+        names.extend(("Verification", "Update Triggers"))
+    return list(dict.fromkeys(names))
+
+
+def _emit_slice_sections(d: SliceDoc, args: argparse.Namespace) -> int:
+    """Output for `slice show` section/body flags (--body/--system/etc)."""
+    if args.body:
+        if args.json:
+            _emit_json({"slice_id": d.slice_id, "body": d.body})
+        else:
+            print(d.body)
+        return 0
+
+    sections = extract_sections(d.body)
+    names = _requested_section_names(args)
+    if args.json:
+        _emit_json({"slice_id": d.slice_id, "sections": _present_sections(sections, names)})
+        return 0
+    for n in names:
+        text = _section_text(sections, n)
+        print(f"{n}:")
+        print(text if text else "  (not present)")
+        print()
+    return 0
+
+
 def cmd_show(args: argparse.Namespace, ctx: Ctx) -> int:
     d = _resolve_slice(load_slice_docs(ctx), args.selector)
+    # Section/body mode — backward compatible: only engages when one of
+    # --body/--system/--call-stacks/--verification is set.
+    if args.body or args.system or args.call_stacks or args.verification:
+        return _emit_slice_sections(d, args)
     manifest = load_doc_manifest(ctx)
     tracked = _docs_for_slice(manifest.docs, d.slice_id)
     data = {
@@ -1071,19 +1361,21 @@ def cmd_stamp(args: argparse.Namespace, ctx: Ctx) -> int:
             print("all docs are up to date")
             return 0
 
-    # Update verified_at in the manifest
+    slices = load_slice_docs(ctx)
+    by_id = _slice_map(slices)
+    target_ids = {t.doc_id for t in targets}
+
+    # Record a content fingerprint of each doc's tracked files (the staleness
+    # anchor) plus the HEAD short-SHA as a human-readable note. Fingerprinting
+    # captures exactly the verified content, so stamping a dirty tree is correct
+    # and no commit-before-stamp guard is needed.
     updated = []
     for td in manifest.docs:
-        if any(t.doc_id == td.doc_id for t in targets):
-            updated.append(TrackedDoc(
-                doc_id=td.doc_id,
-                path=td.path,
-                slices=td.slices,
-                verified_at=short_sha,
-                tags=td.tags,
-                include=td.include,
-                exclude=td.exclude,
-            ))
+        if td.doc_id in target_ids:
+            fp = _content_fingerprint(
+                _resolve_tracked_concrete_files(td, by_id, ctx), ctx.repo_root
+            )
+            updated.append(replace(td, verified_at=short_sha, fingerprint=fp))
             print(f"stamped {td.doc_id} -> {short_sha}")
         else:
             updated.append(td)
@@ -1121,6 +1413,108 @@ def cmd_docs(args: argparse.Namespace, ctx: Ctx) -> int:
         status = "STALE" if td.doc_id in drifted_ids else "ok   "
         tags = f"  [{', '.join(td.tags)}]" if td.tags else ""
         print(f"[{status}] {td.doc_id}  ({td.path})  (verified: {td.verified_at or '(never)'}){tags}")
+    return 0
+
+
+def _context_payload(d: SliceDoc, docs_list: list[TrackedDoc],
+                      drifted_ids: set[str], ctx: Ctx) -> dict[str, Any]:
+    sections = extract_sections(d.body)
+    return {
+        "slice_id": d.slice_id,
+        "description": d.description,
+        "doc_path": ctx.rel(d.doc_path),
+        "files": list(d.files),
+        "dependencies": list(d.dependencies),
+        "docs": [
+            {"doc_id": td.doc_id, "path": td.path,
+             "verified_at": td.verified_at, "stale": td.doc_id in drifted_ids}
+            for td in docs_list
+        ],
+        "sections": _present_sections(sections, STANDARD_SECTIONS),
+    }
+
+
+def _print_context_human(d: SliceDoc, docs_list: list[TrackedDoc],
+                         drifted_ids: set[str], has_manifest: bool, ctx: Ctx) -> None:
+    print(f"slice: {d.slice_id}")
+    print(f"description: {d.description}")
+    print(f"doc: {ctx.rel(d.doc_path)}")
+    print(f"files: {', '.join(d.files) if d.files else '(none)'}")
+    print(f"dependencies: {', '.join(d.dependencies) if d.dependencies else '(none)'}")
+    if has_manifest:
+        print("linked docs:")
+        if docs_list:
+            for td in docs_list:
+                status = "STALE" if td.doc_id in drifted_ids else "ok   "
+                print(f"  [{status}] {td.doc_id}  ({td.path})  (verified: {td.verified_at or '(never)'})")
+        else:
+            print("  (none)")
+    sections = extract_sections(d.body)
+    for n in STANDARD_SECTIONS:
+        text = _section_text(sections, n)
+        print(f"{n}:")
+        print(text if text else "  (not present)")
+    print()
+
+
+def cmd_context(args: argparse.Namespace, ctx: Ctx) -> int:
+    """One-command orientation: resolve a file path (or slice id) to its owning
+    slice and print metadata, linked-doc staleness, and standard system sections.
+    """
+    slices = load_slice_docs(ctx)
+    config = load_config(ctx)
+    if args.strict:
+        ambiguity = "strict"
+    elif args.best_effort:
+        ambiguity = "best_effort"
+    else:
+        ambiguity = config.ambiguity
+
+    owners = _owners_for_path(slices, args.selector, ctx)
+    if owners:
+        if len(owners) > 1:
+            owners = sorted(owners, key=lambda s: s.slice_id)
+            if ambiguity == "strict":
+                ids = ", ".join(o.slice_id for o in owners)
+                print(
+                    f"ambiguous: multiple slices own "
+                    f"{_normalize_repo_path(args.selector, ctx)}: {ids}",
+                    file=sys.stderr,
+                )
+                return 1
+        targets = owners
+    else:
+        try:
+            targets = [_resolve_slice(slices, args.selector)]
+        except KeyError:
+            print(f"no owning slice for: {_normalize_repo_path(args.selector, ctx)}",
+                  file=sys.stderr)
+            return 1
+
+    manifest = load_doc_manifest(ctx)
+    has_manifest = bool(manifest.docs)
+    drifted_ids: set[str] = set()
+    if has_manifest:
+        # Only the docs linked to the resolved target slice(s) — avoids
+        # fingerprinting every tracked file in the repo for a single lookup.
+        target_ids = {d.slice_id for d in targets}
+        relevant = [td for td in manifest.docs
+                    if any(sid in target_ids for sid in td.slices)]
+        drifted_ids = {dr.doc_id for dr in check_doc_drift(relevant, slices, ctx)}
+
+    if args.json:
+        _emit_json({
+            "slices": [
+                _context_payload(d, _docs_for_slice(manifest.docs, d.slice_id),
+                                 drifted_ids, ctx)
+                for d in targets
+            ]
+        })
+        return 0
+
+    for d in targets:
+        _print_context_human(d, _docs_for_slice(manifest.docs, d.slice_id),
+                             drifted_ids, has_manifest, ctx)
     return 0
 
 
@@ -1181,7 +1575,7 @@ def cmd_affected_docs(args: argparse.Namespace, ctx: Ctx) -> int:
             print(f"[{status}] {r['doc_id']}  ({r['path']})  [{slices_str}]")
             for f in r["changed_files"]:
                 print(f"  - {f}")
-    return 1 if results else 0
+    return 1 if any(r["status"] == "stale" for r in results) else 0
 
 
 def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:
@@ -1212,7 +1606,7 @@ def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:
         match = FRONTMATTER_RE.match(content)
         fm: dict[str, Any] = {}
         if match:
-            parsed = yaml.safe_load(match.group(1))
+            parsed = _parse_yaml(match.group(1), rel_path)
             if isinstance(parsed, dict):
                 fm = parsed
 
@@ -1305,6 +1699,112 @@ def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:
 
 
 # ---------------------------------------------------------------------------
+# init — wire slice-cli into a repo
+# ---------------------------------------------------------------------------
+
+_INIT_BLOCK_START = "<!-- slice-cli:start -->"
+_INIT_BLOCK_END = "<!-- slice-cli:end -->"
+
+_AGENT_INSTRUCTIONS = """\
+## slice-cli
+
+This repo tracks whether design docs are stale relative to the code they
+describe, via `slice` (slice-cli) and `slices/DOCS.yaml`.
+
+- Before editing an unfamiliar file, run `slice context <path>` to see the
+  owning slice, its system context, and any stale linked docs.
+- After changing source, run `slice affected-docs <changed-files>` to see which
+  docs may need updating. Update stale docs, then `slice stamp <doc-id>` to mark
+  them verified.
+- `slice stale-docs` lists everything currently stale (exit 1 if any are stale).
+"""
+
+_HOOK_SCRIPT = """\
+#!/bin/sh
+# Installed by `slice init --hook`. Warns about stale docs; never blocks a commit.
+if command -v slice >/dev/null 2>&1; then
+    if ! slice stale-docs >/dev/null 2>&1; then
+        echo "slice-cli: some tracked docs are stale — run 'slice stale-docs' to review." >&2
+    fi
+fi
+exit 0
+"""
+
+_CI_WORKFLOW = """\
+name: slice staleness
+on: [push, pull_request]
+jobs:
+  staleness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Install the slice CLI. Swap for a pinned version or a git source as needed:
+      #   pip install slice-cli==0.1.0
+      #   pip install git+https://github.com/scodge-24/slice-cli
+      - run: pip install slice-cli
+      - run: slice check
+"""
+
+
+def _render_agent_block() -> str:
+    return f"{_INIT_BLOCK_START}\n{_AGENT_INSTRUCTIONS}{_INIT_BLOCK_END}\n"
+
+
+def _upsert_block(existing: str, block: str) -> str:
+    """Insert or replace the marked slice-cli block. Idempotent."""
+    if _INIT_BLOCK_START in existing and _INIT_BLOCK_END in existing:
+        start = existing.index(_INIT_BLOCK_START)
+        end = existing.index(_INIT_BLOCK_END) + len(_INIT_BLOCK_END)
+        # consume a trailing newline after the end marker if present
+        tail = existing[end:]
+        if tail.startswith("\n"):
+            tail = tail[1:]
+        return existing[:start] + block + tail
+    sep = "" if existing == "" or existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+    return existing + sep + block
+
+
+def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
+    """Wire slice-cli into a repo: agent-instruction block, optional hook + CI."""
+    root = ctx.repo_root
+    block = _render_agent_block()
+    planned: list[tuple[Path, str]] = []
+
+    # Agent-instruction files: always CLAUDE.md; AGENTS.md too if it exists.
+    agent_files = [root / "CLAUDE.md"]
+    if (root / "AGENTS.md").exists():
+        agent_files.append(root / "AGENTS.md")
+    if args.global_:
+        agent_files = [Path.home() / ".claude" / "CLAUDE.md"]
+    for path in agent_files:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        planned.append((path, _upsert_block(existing, block)))
+
+    if args.hook:
+        planned.append((root / ".git" / "hooks" / "pre-commit", _HOOK_SCRIPT))
+    if args.ci:
+        planned.append((root / ".github" / "workflows" / "slice-staleness.yml", _CI_WORKFLOW))
+
+    if args.dry_run:
+        for path, _ in planned:
+            print(f"would write: {ctx.rel(path)}")
+        return 0
+
+    for path, content in planned:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        if path.name == "pre-commit":
+            path.chmod(0o755)
+        print(f"wrote {ctx.rel(path)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -1336,10 +1836,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_list)
 
     # show
-    sp = sub.add_parser("show", help="Show one slice.")
+    sp = sub.add_parser(
+        "show", help="Show one slice (metadata, or body sections with flags).",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice show auth-service\n"
+            "  slice show auth-service --body\n"
+            "  slice show auth-service --system\n"
+            "  slice show auth-service --call-stacks\n"
+            "  slice show auth-service --verification"
+        ),
+    )
     _add_selector(sp)
+    sec = sp.add_mutually_exclusive_group()
+    sec.add_argument("--body", action="store_true", help="Print the full Markdown body.")
+    sec.add_argument("--system", action="store_true",
+                     help="Print all standard system sections.")
+    sec.add_argument("--call-stacks", action="store_true", dest="call_stacks",
+                     help="Print the Runtime Flows section only.")
+    sec.add_argument("--verification", action="store_true",
+                     help="Print the Verification and Update Triggers sections.")
     _add_json(sp)
-    sp.set_defaults(func=cmd_show)
+    sp.set_defaults(func=cmd_show, body=False, system=False,
+                    call_stacks=False, verification=False)
 
     # files
     sp = sub.add_parser("files", help="List files owned by a slice.")
@@ -1361,6 +1881,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", help="Repo-relative or absolute path.")
     _add_json(sp)
     sp.set_defaults(func=cmd_for)
+
+    # context
+    sp = sub.add_parser(
+        "context",
+        help="Resolve a file path or slice to its owning slice + system context.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice context src/auth/middleware.py\n"
+            "  slice context auth-service --json\n"
+            "  slice context src/auth/middleware.py --best-effort\n"
+            "\n"
+            "for a single body section, use slice show:\n"
+            "  slice show auth-service --call-stacks\n"
+            "\n"
+            "ambiguity: config slices/config.yaml -> context.ambiguity "
+            "(strict | best_effort);\ndefault strict. Override with --strict / --best-effort."
+        ),
+    )
+    sp.add_argument("selector", help="Repo-relative/absolute file path, or a slice id/doc stem.")
+    amb = sp.add_mutually_exclusive_group()
+    amb.add_argument("--strict", action="store_true",
+                     help="Fail on multiple owning slices (overrides config).")
+    amb.add_argument("--best-effort", action="store_true", dest="best_effort",
+                     help="Print all owning slices on ambiguity (overrides config).")
+    _add_json(sp)
+    sp.set_defaults(func=cmd_context, strict=False, best_effort=False)
 
     # find
     sp = sub.add_parser("find", help="Search slices by keyword.")
@@ -1401,12 +1948,38 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_docs)
 
     # stale-docs
-    sp = sub.add_parser("stale-docs", help="List all stale docs across slices.")
+    sp = sub.add_parser(
+        "stale-docs", help="List all stale docs across slices.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "exit codes:\n"
+            "  0  all tracked docs are current\n"
+            "  1  one or more docs are stale (a status signal, not an error) —\n"
+            "     useful as a pre-commit/CI gate\n"
+            "\n"
+            "examples:\n"
+            "  slice stale-docs\n"
+            "  slice stale-docs --json"
+        ),
+    )
     _add_json(sp)
     sp.set_defaults(func=cmd_stale_docs)
 
     # stamp
-    sp = sub.add_parser("stamp", help="Update verified_at to HEAD in DOCS.yaml.")
+    sp = sub.add_parser(
+        "stamp",
+        help="Mark docs verified: record a content fingerprint of their tracked sources.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "Records a content fingerprint of each doc's tracked files (the staleness\n"
+            "anchor) plus the HEAD short-SHA as a note. Works on a dirty tree.\n"
+            "\n"
+            "examples:\n"
+            "  slice stamp auth-guide        # stamp one doc by id\n"
+            "  slice stamp --slice auth-service\n"
+            "  slice stamp                   # stamp every currently-stale doc"
+        ),
+    )
     sp.add_argument("doc_id", nargs="?", default=None, help="Stamp a specific doc by doc_id.")
     sp.add_argument("--slice", metavar="SLICE_ID", help="Stamp all docs for a slice.")
     sp.add_argument("--doc", metavar="PATH", help="Stamp a specific doc by vault-relative path.")
@@ -1415,7 +1988,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_stamp)
 
     # affected-docs
-    sp = sub.add_parser("affected-docs", help="Find docs affected by changed file paths.")
+    sp = sub.add_parser(
+        "affected-docs", help="Find docs affected by changed file paths.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice affected-docs src/auth/middleware.py\n"
+            "  slice affected-docs $(git diff --name-only) --json\n"
+            "\n"
+            "exit codes: 0 = no affected docs stale, 1 = one or more affected docs stale."
+        ),
+    )
     sp.add_argument("paths", nargs="+", metavar="PATH", help="Changed file paths.")
     _add_json(sp)
     sp.set_defaults(func=cmd_affected_docs)
@@ -1430,6 +2013,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true", help="Overwrite existing DOCS.yaml.")
     sp.set_defaults(func=cmd_docs_bootstrap)
 
+    # init
+    sp = sub.add_parser(
+        "init",
+        help="Wire slice-cli into this repo (agent instructions, optional hook/CI).",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice init                 # add the agent-instruction block to CLAUDE.md/AGENTS.md\n"
+            "  slice init --hook          # also install a pre-commit staleness reminder\n"
+            "  slice init --hook --ci     # also add a GitHub Actions staleness check\n"
+            "  slice init --dry-run       # preview without writing\n"
+            "\n"
+            "The agent block is wrapped in <!-- slice-cli:start/end --> markers and is\n"
+            "idempotent — re-running updates it in place."
+        ),
+    )
+    sp.add_argument("--hook", action="store_true",
+                    help="Install a git pre-commit hook that warns about stale docs.")
+    sp.add_argument("--ci", action="store_true",
+                    help="Write a GitHub Actions workflow running `slice check`.")
+    sp.add_argument("--global", action="store_true", dest="global_",
+                    help="Write the agent block to your user-level ~/.claude/CLAUDE.md instead.")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print what would be written without writing.")
+    sp.set_defaults(func=cmd_init)
+
     return p
 
 
@@ -1442,11 +2051,22 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except yaml.YAMLError as exc:
+        # Backstop — load sites wrap safe_load via _parse_yaml, but guard anyway.
+        print(f"error: malformed YAML: {str(exc).splitlines()[0]}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        if exc.filename == "git":
+            print("error: git not found on PATH — slice requires git. "
+                  "Install git and retry.", file=sys.stderr)
+        else:
+            print(f"error: file not found: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
 

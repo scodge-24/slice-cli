@@ -372,6 +372,14 @@ class TestStamp:
         auth = next(td for td in manifest.docs if td.doc_id == "auth-guide")
         assert "auth" in auth.tags
 
+    def test_stamp_refuses_dirty_tracked_source(self, repo: Path, capsys):
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return False\n")
+        rc = cli.main(["--repo", str(repo), "stamp", "auth-guide"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "cannot stamp docs while their tracked source files are uncommitted" in err
+        assert "src/auth/middleware.py" in err
+
     def test_stamp_no_manifest(self, repo: Path):
         (repo / "slices" / "DOCS.yaml").unlink()
         rc = cli.main(["--repo", str(repo), "stamp", "auth-guide"])
@@ -425,6 +433,29 @@ class TestCheck:
         docs = cli.load_slice_docs(ctx)
         result = cli.run_check(docs, ctx, staleness=False)
         assert result.ok  # No manifest = no doc checks, not an error
+
+    def test_source_fingerprint_tracks_dirty_slice_sources(self, repo: Path, ctx: cli.Ctx):
+        docs = cli.load_slice_docs(ctx)
+        clean = ctx.source_fingerprint(docs)
+        assert clean == ctx.head_sha()
+
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
+        dirty = ctx.source_fingerprint(docs)
+        assert dirty != clean
+        assert len(dirty) == 64
+
+    def test_staleness_uses_source_fingerprint_for_dirty_worktree(self, repo: Path, ctx: cli.Ctx):
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
+
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
+        docs = cli.load_slice_docs(ctx)
+        assert any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
+
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in warning for warning in cli.run_check(docs, ctx).warnings)
 
     def test_doc_id_frontmatter_mismatch_is_error(self, ctx: cli.Ctx):
         # manifest key says "auth-guide" but doc frontmatter says "wrong-id"
@@ -536,7 +567,7 @@ class TestAffectedDocs:
 
     def test_finds_linked_docs_when_current(self, repo: Path, capsys):
         rc = cli.main(["--repo", str(repo), "affected-docs", "src/auth/middleware.py", "--json"])
-        assert rc == 1  # found docs (even if not stale — file maps to a tracked doc)
+        assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert len(data) == 1
         assert data[0]["doc_id"] == "auth-guide"

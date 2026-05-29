@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import glob as globmod
+import hashlib
 import json
 import os
 import re
@@ -94,6 +95,27 @@ class Ctx:
             return self.git("rev-parse", "HEAD").stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             return "unknown"
+
+    def source_fingerprint(self, docs: list[SliceDoc]) -> str:
+        head = self.head_sha()
+        dirty = dirty_slice_source_paths(docs, self)
+        if not dirty:
+            return head
+
+        digest = hashlib.sha256()
+        digest.update(b"slice-source-v1\0")
+        digest.update(head.encode())
+        digest.update(b"\0")
+        for rel_path in sorted(dirty):
+            digest.update(rel_path.encode())
+            digest.update(b"\0")
+            path = self.repo_root / rel_path
+            if path.exists() and path.is_file():
+                digest.update(path.read_bytes())
+            else:
+                digest.update(b"<deleted>")
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def rel(self, path: Path) -> str:
         try:
@@ -396,6 +418,39 @@ def _parse_index(ctx: Ctx) -> tuple[dict[str, dict[str, Any]], list[str]]:
     return rows, order
 
 
+def dirty_slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> list[str]:
+    relevant = _slice_source_paths(docs, ctx)
+    dirty: list[str] = []
+    try:
+        proc = ctx.git("status", "--porcelain=v1", "-z", "--untracked-files=all", check=False)
+    except (OSError, FileNotFoundError):
+        return dirty
+
+    entries = proc.stdout.split("\0")
+    for entry in entries:
+        if not entry:
+            continue
+        path = entry[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        normalized = _normalize_repo_path(path, ctx)
+        if normalized in relevant:
+            dirty.append(normalized)
+    return dirty
+
+
+def _slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> set[str]:
+    paths: set[str] = set()
+    for doc in docs:
+        paths.add(ctx.rel(doc.doc_path))
+        for raw_path in doc.files:
+            if any(c in raw_path for c in ("*", "?", "[")):
+                paths.update(ctx.rel(path) for path in _expand_glob(raw_path, ctx.repo_root))
+            else:
+                paths.add(_normalize_repo_path(raw_path, ctx))
+    return paths
+
+
 def _generate_index(docs: list[SliceDoc], ctx: Ctx) -> str:
     _, current_order = _parse_index(ctx)
     by_id = _slice_map(docs)
@@ -416,6 +471,7 @@ def _generate_index(docs: list[SliceDoc], ctx: Ctx) -> str:
         "# Slice Index",
         "",
         f"Last updated: {ctx.head_sha()}",
+        f"Source fingerprint: {ctx.source_fingerprint(docs)}",
         "",
         "| Slice ID | Description | LoC |",
         "|----------|-------------|-----|",
@@ -583,6 +639,28 @@ def _docs_for_slice(
     return [td for td in tracked_docs if slice_id in td.slices]
 
 
+def _dirty_tracked_files(
+    tracked_docs: list[TrackedDoc],
+    slices: list[SliceDoc],
+    ctx: Ctx,
+) -> dict[str, list[str]]:
+    """Return dirty source files for each tracked doc, relative to HEAD."""
+    by_id = _slice_map(slices)
+    dirty_by_doc: dict[str, list[str]] = {}
+    for td in tracked_docs:
+        files = _resolve_tracked_files(td, by_id)
+        if not files:
+            continue
+        try:
+            proc = ctx.git("diff", "--name-only", "HEAD", "--", *files, check=False)
+        except (OSError, FileNotFoundError):
+            continue
+        changed = sorted(line.strip() for line in proc.stdout.splitlines() if line.strip())
+        if changed:
+            dirty_by_doc[td.doc_id] = changed
+    return dirty_by_doc
+
+
 def _frontmatter_doc_id(doc_path: Path) -> str | None:
     """Read the doc_id field from a markdown file's YAML frontmatter.
 
@@ -721,15 +799,18 @@ def run_check(
     if staleness and ctx.index_path.is_file():
         content = ctx.index_path.read_text(encoding="utf-8")
         sha_match = re.search(r"Last updated:\s*([0-9a-fA-F]+)", content)
+        fingerprint_match = re.search(r"Source fingerprint:\s*([0-9a-fA-F]+)", content)
         if not sha_match:
             result.warnings.append("INDEX.md has no 'Last updated: <hash>' line")
-        else:
-            index_hash = sha_match.group(1).strip()
-            head = ctx.head_sha()
-            min_len = min(len(index_hash), len(head))
-            if head[:min_len] != index_hash[:min_len]:
+        recorded = fingerprint_match.group(1).strip() if fingerprint_match else None
+        if recorded is None and sha_match:
+            recorded = sha_match.group(1).strip()
+        if recorded is not None:
+            current = ctx.source_fingerprint(docs)
+            min_len = min(len(recorded), len(current))
+            if current[:min_len] != recorded[:min_len]:
                 result.warnings.append(
-                    f"INDEX.md stale: recorded {index_hash[:12]}, HEAD is {head[:12]}"
+                    f"INDEX.md stale: recorded {recorded[:12]}, source fingerprint is {current[:12]}"
                 )
 
     # --- Staged source coverage ---
@@ -1071,6 +1152,20 @@ def cmd_stamp(args: argparse.Namespace, ctx: Ctx) -> int:
             print("all docs are up to date")
             return 0
 
+    slices = load_slice_docs(ctx)
+    dirty_by_doc = _dirty_tracked_files(targets, slices, ctx)
+    if dirty_by_doc:
+        print(
+            "cannot stamp docs while their tracked source files are uncommitted; "
+            "commit source/doc changes first, then run slice stamp",
+            file=sys.stderr,
+        )
+        for doc_id, files in dirty_by_doc.items():
+            print(f"{doc_id}:", file=sys.stderr)
+            for path in files:
+                print(f"  - {path}", file=sys.stderr)
+        return 1
+
     # Update verified_at in the manifest
     updated = []
     for td in manifest.docs:
@@ -1181,7 +1276,7 @@ def cmd_affected_docs(args: argparse.Namespace, ctx: Ctx) -> int:
             print(f"[{status}] {r['doc_id']}  ({r['path']})  [{slices_str}]")
             for f in r["changed_files"]:
                 print(f"  - {f}")
-    return 1 if results else 0
+    return 1 if any(r["status"] == "stale" for r in results) else 0
 
 
 def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:

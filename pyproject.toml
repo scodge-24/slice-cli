@@ -30,7 +30,10 @@ py-modules = ["slices_cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]
-addopts = "-q"
+# examples/mock-repo is sample data the CLI runs against, not part of this
+# project's suite — its tests import `src.*` relative to the mock repo root and
+# only run via `pytest` from inside examples/mock-repo.
+addopts = "-q --ignore=examples"
 
 [tool.coverage.run]
 source = ["slices_cli"]

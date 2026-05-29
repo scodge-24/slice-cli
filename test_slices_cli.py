@@ -286,6 +286,50 @@ class TestDocDrift:
         assert len(drifted) == 1
         assert "api-handlers" in drifted[0].affected_slices
 
+    def test_fingerprint_drift_narrows_changed_files(self, repo: Path, ctx: cli.Ctx):
+        # A fingerprinted doc that drifts reports only the files that actually
+        # changed — not its whole tracked set (matching the legacy SHA branch).
+        assert cli.main(["--repo", str(repo), "stamp", "auth-guide"]) == 0
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token():\n    return 0\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit middleware"], cwd=repo, capture_output=True, check=True)
+        manifest = cli.load_doc_manifest(ctx)
+        slices = cli.load_slice_docs(ctx)
+        drift = next(d for d in cli.check_doc_drift(manifest.docs, slices, ctx)
+                     if d.doc_id == "auth-guide")
+        assert "src/auth/middleware.py" in drift.changed_files
+        assert "src/auth/sessions.py" not in drift.changed_files
+
+
+# ---------------------------------------------------------------------------
+# Glob expansion
+# ---------------------------------------------------------------------------
+
+class TestGlobExpansion:
+    def test_glob_expands_to_matching_files(self, repo: Path):
+        names = {p.name for p in cli._expand_glob("src/auth/*.py", repo)}
+        assert names == {"middleware.py", "sessions.py"}
+
+    def test_literal_filename_with_metachars_resolves(self, repo: Path):
+        # A real file whose name contains glob metacharacters (e.g. a Next.js
+        # route file) must resolve to itself, not be dropped as a non-matching glob.
+        route = repo / "app" / "[id]"
+        route.mkdir(parents=True)
+        target = route / "page.tsx"
+        target.write_text("export default Page\n")
+        assert cli._expand_glob("app/[id]/page.tsx", repo) == [target.resolve()]
+
+    def test_metachar_file_edits_are_fingerprinted(self, repo: Path, ctx: cli.Ctx):
+        route = repo / "app" / "[id]"
+        route.mkdir(parents=True)
+        (route / "page.tsx").write_text("v1\n")
+        fp1 = cli._content_fingerprint(
+            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        (route / "page.tsx").write_text("v2\n")
+        fp2 = cli._content_fingerprint(
+            sorted(cli._resolve_raw_path("app/[id]/page.tsx", ctx)), ctx.repo_root)
+        assert fp1 != fp2  # the edit is visible to staleness tracking
+
 
 # ---------------------------------------------------------------------------
 # Include/exclude

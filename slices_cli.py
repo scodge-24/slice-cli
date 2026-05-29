@@ -389,6 +389,11 @@ def _section_text(sections: dict[str, str], name: str) -> str:
     return ""
 
 
+def _present_sections(sections: dict[str, str], names: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """{name: text} for each requested standard section that is present."""
+    return {n: t for n in names if (t := _section_text(sections, n))}
+
+
 # ---------------------------------------------------------------------------
 # Config — slices/config.yaml
 # ---------------------------------------------------------------------------
@@ -477,9 +482,21 @@ def _find_matches(
     return matches
 
 
+def _is_glob(pattern: str) -> bool:
+    """True if the path spec contains shell-glob metacharacters."""
+    return any(c in pattern for c in ("*", "?", "["))
+
+
 def _expand_glob(pattern: str, root: Path) -> list[Path]:
-    if any(c in pattern for c in ("*", "?", "[")):
-        return sorted(Path(m).resolve() for m in globmod.glob(str(root / pattern), recursive=True))
+    if _is_glob(pattern):
+        matches = sorted(Path(m).resolve() for m in globmod.glob(str(root / pattern), recursive=True))
+        if matches:
+            return matches
+        # A real file may legitimately contain glob metacharacters in its name
+        # (e.g. a Next.js route file `app/[id]/page.tsx`). If the pattern matched
+        # nothing but names an existing file, treat it as that literal file.
+        literal = (root / pattern).resolve()
+        return [literal] if literal.is_file() else []
     resolved = (root / pattern).resolve()
     return [resolved] if resolved.exists() else []
 
@@ -508,15 +525,25 @@ def _parse_index(ctx: Ctx) -> tuple[dict[str, dict[str, Any]], list[str]]:
     return rows, order
 
 
+def _resolve_raw_path(raw: str, ctx: Ctx) -> set[str]:
+    """Resolve one tracked-path spec to repo-relative file paths.
+
+    Globs expand to their matching files; a plain path normalizes as-is (kept
+    even if absent, so a deletion still changes a fingerprint). Shared by INDEX
+    source fingerprinting and per-doc staleness anchoring so both agree on
+    exactly which files back a verification.
+    """
+    if _is_glob(raw):
+        return {ctx.rel(p) for p in _expand_glob(raw, ctx.repo_root) if p.is_file()}
+    return {_normalize_repo_path(raw, ctx)}
+
+
 def _slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> set[str]:
     paths: set[str] = set()
     for doc in docs:
         paths.add(ctx.rel(doc.doc_path))
         for raw_path in doc.files:
-            if any(c in raw_path for c in ("*", "?", "[")):
-                paths.update(ctx.rel(path) for path in _expand_glob(raw_path, ctx.repo_root))
-            else:
-                paths.add(_normalize_repo_path(raw_path, ctx))
+            paths |= _resolve_raw_path(raw_path, ctx)
     return paths
 
 
@@ -603,12 +630,7 @@ def _resolve_tracked_concrete_files(
     """
     out: set[str] = set()
     for raw in _resolve_tracked_files(td, by_id):
-        if any(c in raw for c in ("*", "?", "[")):
-            for p in _expand_glob(raw, ctx.repo_root):
-                if p.is_file():
-                    out.add(ctx.rel(p))
-        else:
-            out.add(_normalize_repo_path(raw, ctx))
+        out |= _resolve_raw_path(raw, ctx)
     return sorted(out)
 
 
@@ -660,6 +682,41 @@ def _resolve_track_to_slice_ids(
     return sorted(slice_ids)
 
 
+def _affected_slices(
+    changed: set[str], linked_slices: list[str], by_id: dict[str, SliceDoc]
+) -> list[str]:
+    """Subset of linked slices whose files actually changed."""
+    affected = []
+    for sid in linked_slices:
+        s = by_id.get(sid)
+        if s and any(
+            c == f or fnmatch.fnmatch(c, f)
+            for c in changed for f in s.files
+        ):
+            affected.append(sid)
+    return affected
+
+
+def _git_changed_files(files: list[str], verified_at: str, ctx: Ctx) -> set[str]:
+    """Files among `files` changed since verified_at (committed) or in the
+    working tree. Best-effort — empty if git cannot resolve the range."""
+    changed: set[str] = set()
+    if verified_at:
+        try:
+            proc = ctx.git("diff", "--name-only", f"{verified_at}..HEAD",
+                           "--", *files, check=False)
+            if proc.returncode == 0:
+                changed.update(l.strip() for l in proc.stdout.splitlines() if l.strip())
+        except (OSError, FileNotFoundError):
+            pass
+    try:
+        wt = ctx.git("diff", "--name-only", "HEAD", "--", *files, check=False)
+        changed.update(l.strip() for l in wt.stdout.splitlines() if l.strip())
+    except (OSError, FileNotFoundError):
+        pass
+    return changed
+
+
 def check_doc_drift(
     tracked_docs: list[TrackedDoc],
     slices: list[SliceDoc],
@@ -684,12 +741,17 @@ def check_doc_drift(
         if td.fingerprint:
             concrete = _resolve_tracked_concrete_files(td, by_id, ctx)
             if _content_fingerprint(concrete, ctx.repo_root) != td.fingerprint:
+                # The fingerprint is the staleness gate; narrow the report to the
+                # files git says changed (matching the legacy branch and the
+                # documented JSON shape), falling back to the full tracked set
+                # when git cannot attribute the change.
+                changed = _git_changed_files(files, td.verified_at, ctx)
                 drifted.append(DocDrift(
                     doc_id=td.doc_id,
                     path=td.path,
                     verified_at=td.verified_at or "(never)",
-                    affected_slices=linked_slices,
-                    changed_files=concrete,
+                    affected_slices=_affected_slices(changed, linked_slices, by_id) or linked_slices,
+                    changed_files=sorted(changed) if changed else concrete,
                 ))
             continue
 
@@ -736,21 +798,11 @@ def check_doc_drift(
             pass
 
         if changed:
-            # Determine which slices are actually affected
-            affected = []
-            for sid in linked_slices:
-                s = by_id.get(sid)
-                if s and any(
-                    c == f or fnmatch.fnmatch(c, f)
-                    for c in changed for f in s.files
-                ):
-                    affected.append(sid)
-
             drifted.append(DocDrift(
                 doc_id=td.doc_id,
                 path=td.path,
                 verified_at=td.verified_at,
-                affected_slices=affected or linked_slices,
+                affected_slices=_affected_slices(changed, linked_slices, by_id) or linked_slices,
                 changed_files=sorted(changed),
             ))
 
@@ -857,7 +909,7 @@ def run_check(
 
         # File path existence (with glob support)
         for raw_path in d.files:
-            if any(c in raw_path for c in ("*", "?", "[")):
+            if _is_glob(raw_path):
                 if not globmod.glob(str(root / raw_path), recursive=True):
                     result.errors.append(f"{ctx.rel(d.doc_path)}: glob matches nothing: {raw_path}")
             else:
@@ -948,7 +1000,7 @@ def run_check(
             glob_patterns: list[str] = []
             for d in docs:
                 for raw_path in d.files:
-                    if any(c in raw_path for c in ("*", "?", "[")):
+                    if _is_glob(raw_path):
                         glob_patterns.append(raw_path)
                         for resolved in _expand_glob(raw_path, root):
                             if resolved.is_file():
@@ -1041,13 +1093,7 @@ def _requested_section_names(args: argparse.Namespace) -> list[str]:
         names.append("Runtime Flows")
     if getattr(args, "verification", False):
         names.extend(("Verification", "Update Triggers"))
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            ordered.append(n)
-    return ordered
+    return list(dict.fromkeys(names))
 
 
 def _emit_slice_sections(d: SliceDoc, args: argparse.Namespace) -> int:
@@ -1062,8 +1108,7 @@ def _emit_slice_sections(d: SliceDoc, args: argparse.Namespace) -> int:
     sections = extract_sections(d.body)
     names = _requested_section_names(args)
     if args.json:
-        present = {n: _section_text(sections, n) for n in names if _section_text(sections, n)}
-        _emit_json({"slice_id": d.slice_id, "sections": present})
+        _emit_json({"slice_id": d.slice_id, "sections": _present_sections(sections, names)})
         return 0
     for n in names:
         text = _section_text(sections, n)
@@ -1385,10 +1430,7 @@ def _context_payload(d: SliceDoc, docs_list: list[TrackedDoc],
              "verified_at": td.verified_at, "stale": td.doc_id in drifted_ids}
             for td in docs_list
         ],
-        "sections": {
-            n: _section_text(sections, n)
-            for n in STANDARD_SECTIONS if _section_text(sections, n)
-        },
+        "sections": _present_sections(sections, STANDARD_SECTIONS),
     }
 
 
@@ -1453,7 +1495,12 @@ def cmd_context(args: argparse.Namespace, ctx: Ctx) -> int:
     has_manifest = bool(manifest.docs)
     drifted_ids: set[str] = set()
     if has_manifest:
-        drifted_ids = {dr.doc_id for dr in check_doc_drift(manifest.docs, slices, ctx)}
+        # Only the docs linked to the resolved target slice(s) — avoids
+        # fingerprinting every tracked file in the repo for a single lookup.
+        target_ids = {d.slice_id for d in targets}
+        relevant = [td for td in manifest.docs
+                    if any(sid in target_ids for sid in td.slices)]
+        drifted_ids = {dr.doc_id for dr in check_doc_drift(relevant, slices, ctx)}
 
     if args.json:
         _emit_json({
@@ -1745,7 +1792,7 @@ def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
 
     if args.dry_run:
         for path, _ in planned:
-            print(f"would write: {ctx.rel(path) if root in path.parents or path == root else path}")
+            print(f"would write: {ctx.rel(path)}")
         return 0
 
     for path, content in planned:
@@ -1753,8 +1800,7 @@ def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
         path.write_text(content, encoding="utf-8")
         if path.name == "pre-commit":
             path.chmod(0o755)
-        rel = ctx.rel(path) if str(path).startswith(str(root)) else str(path)
-        print(f"wrote {rel}")
+        print(f"wrote {ctx.rel(path)}")
     return 0
 
 
@@ -2013,7 +2059,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: malformed YAML: {str(exc).splitlines()[0]}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
-        if exc.filename == "git" or "git" in str(exc):
+        if exc.filename == "git":
             print("error: git not found on PATH — slice requires git. "
                   "Install git and retry.", file=sys.stderr)
         else:

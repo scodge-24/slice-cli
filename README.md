@@ -26,6 +26,20 @@ From a source checkout, you can also run the CLI without installing it:
 python -m slice_cli --repo examples/mock-repo list --json
 ```
 
+## Rust Prototype
+
+This branch also contains a native Rust prototype at `rust/slice-rs`. It is not
+the public `slice` entry point yet; install/use the Python package above for the
+supported CLI. From a source checkout:
+
+```bash
+cargo run --manifest-path rust/slice-rs/Cargo.toml -- --repo examples/mock-repo list --json
+```
+
+The prototype currently mirrors the command surface for parity/performance
+testing. Replacement requires the gates in
+[`design/rust-gap-closure-plan.md`](design/rust-gap-closure-plan.md).
+
 ## 60-second tour
 
 This repo ships a self-contained demo under `examples/mock-repo/`. Point `slice`

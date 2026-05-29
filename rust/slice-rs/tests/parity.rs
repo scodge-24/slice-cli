@@ -220,6 +220,7 @@ fn subprocess_and_remaining_delegated_commands_match_python() {
         &["sync-index", "--stdout"][..],
         &["grep", "auth-service", "verify_token"],
         &["init", "--dry-run"],
+        &["init", "--agent", "--dry-run"],
     ] {
         assert_eq!(run_rust_raw(args), run_python_raw(args), "args: {args:?}");
     }
@@ -324,6 +325,37 @@ docs:
         run_rust_for_repo(repo, &args),
         run_python_for_repo(repo, &args)
     );
+}
+
+#[test]
+fn native_init_writes_agent_block_hook_ci_and_agent() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    let result = run_rust_raw_for_repo(repo, &["init", "--hook", "--ci", "--agent"]);
+    assert_eq!(result.0, 0);
+
+    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+    assert!(claude.contains("<!-- slice-cli:start -->"));
+    assert!(claude.contains("slice context"));
+    let hook = repo.join(".git/hooks/pre-commit");
+    assert!(hook.exists());
+    assert!(
+        std::fs::read_to_string(&hook)
+            .unwrap()
+            .contains("stale-docs")
+    );
+    assert!(repo.join(".github/workflows/slice-staleness.yml").exists());
+    let skill =
+        std::fs::read_to_string(repo.join(".claude/skills/slice-codebase/SKILL.md")).unwrap();
+    assert!(skill.contains("name: slice-codebase"));
+    assert!(!skill.contains("slice-cli:codebase-slicer"));
+    assert!(skill.contains("subagent_type: \"codebase-slicer\""));
+    assert!(repo.join(".claude/agents/codebase-slicer.md").exists());
+
+    let second = run_rust_raw_for_repo(repo, &["init"]);
+    assert_eq!(second.0, 0);
+    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+    assert_eq!(claude.matches("<!-- slice-cli:start -->").count(), 1);
 }
 
 #[test]

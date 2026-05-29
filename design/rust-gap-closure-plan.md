@@ -43,7 +43,7 @@ Implemented:
 - `stale-docs` with process-git attribution baseline
 - native `sync-index`, `stamp`, and `docs-bootstrap`
 - native `check --json` and human summary output
-- delegated bridge for `init`
+- native `init`
 
 Implemented test/monitoring support:
 
@@ -71,22 +71,21 @@ Progress:
   index consistency/staleness, staged coverage, DOCS.yaml validation, doc drift,
   and verification links, with JSON parity tests for mock and manifest-error
   fixtures.
-- Lane 6 command-surface coverage is bridged for `init` by delegating to the
-  Python implementation through the Rust CLI. This is a compatibility bridge,
-  not the final native-port acceptance state.
+- Lane 6 now has native `init`, with embedded skill/agent templates sourced from
+  the committed plugin files and tests for dry-run, hook/CI writes, idempotent
+  agent blocks, and loose agent installs.
 
 ## Gaps
 
-Missing native Python-command ports:
-
-- `init`
+Missing native Python-command ports: none.
 
 Partial behavior:
 
 - `grep` is native but still subprocess-based by design.
-- `init` is currently a delegated bridge command.
 - `check` has native JSON parity coverage for representative fixtures but not
   yet the full Python `TestCheck` and `TestVerificationLinks` fixture matrix.
+- the Rust prototype is documented as source-checkout-only; public installation
+  still uses the Python `slice` entry point until replacement gates pass.
 - no git backend trait/native backend has landed.
 - glob/path behavior has basic parity coverage but not full Python fixture
   coverage.
@@ -289,8 +288,8 @@ Implementation notes:
 
 - `grep` can continue invoking `rg`; this command is inherently subprocess
   based.
-- `init` can either port embedded templates to Rust constants or delegate to the
-  Python implementation until replacement is approved.
+- `init` ports embedded templates using the committed plugin skill/agent files
+  as the source of truth.
 - Distribution is a separate product decision:
   - keep Python package and ship `slice-rs` as optional companion
   - use a Python wheel that bundles the Rust binary
@@ -341,5 +340,6 @@ If accepted:
 - [x] Lane 4 - native write commands
 - [x] Lane 5 - native validation baseline
 - [ ] Lane 5 - full Python validation fixture coverage
-- [ ] Lane 6 - init, grep, distribution
+- [x] Lane 6 - init and grep command coverage
+- [x] Lane 6 - prototype distribution documentation
 - [ ] Lane 7 - replacement decision

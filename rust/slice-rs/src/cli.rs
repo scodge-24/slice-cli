@@ -7,6 +7,7 @@ use crate::check::{CheckOptions, output as check_output, run as run_check};
 use crate::commands::{self, ShowMode};
 use crate::context::Context;
 use crate::index;
+use crate::init::{InitOptions, run as run_init};
 
 #[derive(Debug, Parser)]
 #[command(name = "slice-rs", about = "Rust prototype for slice-cli hot paths.")]
@@ -312,32 +313,15 @@ fn run_inner(args: Args) -> Result<i32> {
             agent,
             global_,
             dry_run,
-        } => commands::python_fallback(
+        } => run_init(
             &ctx,
-            &args_with_flags(
-                "init",
-                &[
-                    ("--hook", hook),
-                    ("--ci", ci),
-                    ("--agent", agent),
-                    ("--global", global_),
-                    ("--dry-run", dry_run),
-                ],
-            ),
+            InitOptions {
+                hook,
+                ci,
+                agent,
+                global: global_,
+                dry_run,
+            },
         ),
-    }
-}
-
-fn args_with_flags(command: &str, flags: &[(&str, bool)]) -> Vec<String> {
-    let mut args = vec![command.to_owned()];
-    for (flag, enabled) in flags {
-        push_flag(&mut args, *enabled, flag);
-    }
-    args
-}
-
-fn push_flag(args: &mut Vec<String>, enabled: bool, flag: &str) {
-    if enabled {
-        args.push(flag.to_owned());
     }
 }

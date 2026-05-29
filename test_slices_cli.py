@@ -964,3 +964,81 @@ class TestInit:
         out = capsys.readouterr().out
         assert "examples:" in out
         assert "--hook" in out and "--ci" in out
+
+
+# ---------------------------------------------------------------------------
+# Command coverage: docs-bootstrap, files, deps, grep, transitive/circular
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil
+
+
+class TestDocsBootstrap:
+    def test_generates_manifest_from_tracks(self, repo: Path, ctx: cli.Ctx):
+        (repo / "slices" / "DOCS.yaml").unlink()
+        vault = repo / "vault"
+        vault.mkdir()
+        (vault / "guide.md").write_text(
+            "---\ndoc_id: guide\ntracks:\n  - src/auth/middleware.py\n---\n# Guide\n"
+        )
+        rc = cli.main(["--repo", str(repo), "docs-bootstrap", str(vault)])
+        assert rc == 0
+        manifest = cli.load_doc_manifest(ctx)
+        guide = next(td for td in manifest.docs if td.doc_id == "guide")
+        assert "auth-service" in guide.slices
+
+    def test_dry_run_writes_nothing(self, repo: Path):
+        (repo / "slices" / "DOCS.yaml").unlink()
+        vault = repo / "vault"
+        vault.mkdir()
+        (vault / "guide.md").write_text("---\ndoc_id: guide\ntracks: [src/auth/middleware.py]\n---\n#\n")
+        rc = cli.main(["--repo", str(repo), "docs-bootstrap", str(vault), "--dry-run"])
+        assert rc == 0
+        assert not (repo / "slices" / "DOCS.yaml").exists()
+
+
+class TestCommandCoverage:
+    def test_files(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "files", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "src/auth/middleware.py" in data
+
+    def test_deps_direct(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "api-handlers", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dependencies"] == ["auth-service"]
+
+    def test_deps_reverse(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "auth-service", "--reverse", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "api-handlers" in data["dependencies"]
+
+    def test_deps_transitive(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "deps", "api-handlers", "--transitive", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "auth-service" in data["dependencies"]
+
+    def test_deps_transitive_handles_cycle(self, repo: Path, capsys):
+        # A -> B -> A must terminate, not hang or crash.
+        slices = repo / "slices"
+        (slices / "cyc-a.md").write_text(
+            "---\nslice_id: cyc-a\ndescription: A\nfiles: []\ndependencies: [cyc-b]\n---\nA\n"
+        )
+        (slices / "cyc-b.md").write_text(
+            "---\nslice_id: cyc-b\ndescription: B\nfiles: []\ndependencies: [cyc-a]\n---\nB\n"
+        )
+        assert cli.main(["--repo", str(repo), "deps", "cyc-a", "--transitive", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "cyc-b" in data["dependencies"]
+
+    @pytest.mark.skipif(_shutil.which("rg") is None, reason="ripgrep not installed")
+    def test_grep(self, repo: Path):
+        # verify_token is defined in src/auth/middleware.py (owned by auth-service)
+        rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
+        assert rc == 0
+
+    def test_grep_without_rg_is_graceful(self, repo: Path, monkeypatch, capsys):
+        monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+        rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
+        assert rc == 2
+        assert "rg is required" in capsys.readouterr().err

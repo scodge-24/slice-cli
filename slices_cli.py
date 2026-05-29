@@ -1891,7 +1891,7 @@ Agent call (one per candidate, all launched in parallel):
     - files: <file list>
     - entry_points: <entry points>
     - all candidate IDs: <full list from scout>
-    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly."
+    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly, including the mandatory body sections: ## Runtime Flows (call-stack chains from outgoingCalls), ## Verification (V-model links — for each abstraction, incomingCalls filtered to test files, written as `abstraction <- testpath::testname`, plus an optional `upstream:` design-doc link), and ## Update Triggers. The verification-link format and test-file heuristic are in the codebase-slicer agent definition and design/verification-links.md."
 ```
 
 Wait for ALL refine agents to complete before Phase 3.
@@ -2040,6 +2040,7 @@ Your job: take one candidate slice area (provided in your prompt with its file l
 4. Identify abstractions that define this slice's public interface
 5. Identify dependencies on other areas of the codebase (by file path — the orchestrator will map these to slice IDs)
 6. Note any files that should be excluded (tests, generated code, etc.)
+7. **Map verification links.** For each public abstraction, take its `incomingCalls` and keep callers that live in **test files** — those are the tests that verify it. A file is a test file if its path is under `tests/`, `test/`, `__tests__/`, or `spec/`, or its name matches `test_*`, `*_test.*`, `*.test.*`, or `*.spec.*`. Record each as `abstraction <- testpath::testname`.
 
 **Step 6: Write the slice file.** Write your findings directly to `slices/<slice-id>.md` using this exact format:
 
@@ -2062,7 +2063,33 @@ dependencies:
 
 <2-5 sentences: what this slice covers, main entry points, key data flows.
 Note any boundary decisions (e.g., why LoC exceeds target, why files are grouped this way).>
+
+## Runtime Flows
+
+<Call-stack chains from the entry points, derived from outgoingCalls. One chain per line, e.g.:
+request -> require_auth -> verify_token -> get_session -> handler>
+
+## Verification
+
+<V-model traceability links. One bullet per verified abstraction (from Step 7), plus an
+optional `upstream:` link to the design doc/requirement this slice serves. Omit the
+upstream line if no design doc clearly covers this slice. Format:
+- `abstraction` <- path/to/test_file::test_name, path/to/test_file::other_test
+- upstream: design/<relevant-doc>.md>
+
+## Update Triggers
+
+<What should trigger re-verification of this slice — typically its own entry points and
+public contracts. When these change, the linked tests must be re-run and this slice
+re-reviewed.>
 ```
+
+The three sections above (`Runtime Flows`, `Verification`, `Update Triggers`) are
+**mandatory** — they carry the call-stack map and the verification links the CLI surfaces
+via `slice show --call-stacks` / `--verification`. Optionally add `## System Behavior` and
+`## Invariants` when you can ground them in what the code actually does; skip them rather
+than guessing. The verification-link format is specified in `design/verification-links.md`;
+`slice check` validates the links, so every referenced path must exist.
 
 For dependencies, use slice IDs (provided in your prompt alongside the candidate list), not file paths. If a dependency target isn't in the candidate list, note the file path and prefix with `external:`.
 

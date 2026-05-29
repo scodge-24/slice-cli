@@ -68,7 +68,7 @@ stamped auth-guide -> 5fb503f...
 | `slice stale-docs` | Everything currently stale (exit 1 if any — handy as a CI gate) |
 | `slice stamp <doc>` | Mark a doc verified against current code |
 | `slice list` / `show` / `for` / `find` / `deps` | Navigate slices |
-| `slice check` | Integrity + staleness checks |
+| `slice check` | Integrity, staleness, and verification-link checks (`--require-verification` for V-model coverage) |
 | `slice init` | Wire `slice` into your repo (agent instructions, optional hook/CI) |
 
 Run `slice <command> -h` for examples and flags.

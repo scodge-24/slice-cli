@@ -42,7 +42,8 @@ Implemented:
 - `affected-docs` for explicit paths
 - `stale-docs` with process-git attribution baseline
 - native `sync-index`, `stamp`, and `docs-bootstrap`
-- delegated bridges for `check` and `init`
+- native `check --json` and human summary output
+- delegated bridge for `init`
 
 Implemented test/monitoring support:
 
@@ -66,21 +67,26 @@ Progress:
 - Lane 4 now has native Rust ports for `stamp`, `sync-index`, and
   `docs-bootstrap`, including temp-repo tests for stdout, write mode, dry-run,
   bad target exits, fingerprint stamping, and manifest loading.
-- Lane 6 command-surface coverage is bridged for `check` and `init` by
-  delegating to the Python implementation through the Rust CLI. This is a
-  compatibility bridge, not the final native-port acceptance state.
+- Lane 5 now has a native Rust `check` baseline covering structural validation,
+  index consistency/staleness, staged coverage, DOCS.yaml validation, doc drift,
+  and verification links, with JSON parity tests for mock and manifest-error
+  fixtures.
+- Lane 6 command-surface coverage is bridged for `init` by delegating to the
+  Python implementation through the Rust CLI. This is a compatibility bridge,
+  not the final native-port acceptance state.
 
 ## Gaps
 
 Missing native Python-command ports:
 
-- `check`
 - `init`
 
 Partial behavior:
 
 - `grep` is native but still subprocess-based by design.
-- `check` and `init` are currently delegated bridge commands.
+- `init` is currently a delegated bridge command.
+- `check` has native JSON parity coverage for representative fixtures but not
+  yet the full Python `TestCheck` and `TestVerificationLinks` fixture matrix.
 - no git backend trait/native backend has landed.
 - glob/path behavior has basic parity coverage but not full Python fixture
   coverage.
@@ -333,6 +339,7 @@ If accepted:
 - [x] Lane 3 - process-git staleness attribution baseline
 - [ ] Lane 3 - backend trait and native backend decision
 - [x] Lane 4 - native write commands
-- [ ] Lane 5 - native validation parity
+- [x] Lane 5 - native validation baseline
+- [ ] Lane 5 - full Python validation fixture coverage
 - [ ] Lane 6 - init, grep, distribution
 - [ ] Lane 7 - replacement decision

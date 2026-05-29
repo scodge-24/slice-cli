@@ -215,7 +215,7 @@ fn affected_docs_matches_python_for_legacy_manifest_shape() {
 }
 
 #[test]
-fn delegated_and_subprocess_commands_match_python() {
+fn subprocess_and_remaining_delegated_commands_match_python() {
     for args in [
         &["sync-index", "--stdout"][..],
         &["grep", "auth-service", "verify_token"],
@@ -277,6 +277,53 @@ fn native_docs_bootstrap_dry_run_and_write_match_python_shape() {
     assert_eq!(docs.0, 0);
     assert_eq!(docs.1[0]["doc_id"], "guide");
     assert_eq!(docs.1[0]["tags"][0], "auth");
+}
+
+#[test]
+fn native_check_json_matches_python_for_manifest_errors() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+
+    let args = ["check", "--json", "--no-staleness"];
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+
+    std::fs::remove_file(repo.join("docs/auth-guide.md")).unwrap();
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
+}
+
+#[test]
+fn native_check_json_matches_python_for_unknown_manifest_slice() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::write(
+        repo.join("docs/auth-guide.md"),
+        "---\ndoc_id: auth-guide\n---\n# Auth Guide\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/DOCS.yaml"),
+        r"vault_root: ../docs
+docs:
+  auth-guide:
+    path: auth-guide.md
+    slices:
+    - missing-slice
+    verified_at: abc
+",
+    )
+    .unwrap();
+
+    let args = ["check", "--json", "--no-staleness"];
+    assert_eq!(
+        run_rust_for_repo(repo, &args),
+        run_python_for_repo(repo, &args)
+    );
 }
 
 #[test]

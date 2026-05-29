@@ -1340,7 +1340,7 @@ fn section_text<'a>(sections: &'a [(String, String)], name: &str) -> Option<&'a 
         .map(|(_, text)| text.as_str())
 }
 
-fn emit_json<T: Serialize>(value: &T) -> Result<()> {
+pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
     serde_json::to_writer_pretty(&mut lock, value)?;

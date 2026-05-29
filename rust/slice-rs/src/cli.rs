@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::Result;
+use crate::check::{CheckOptions, output as check_output, run as run_check};
 use crate::commands::{self, ShowMode};
 use crate::context::Context;
 use crate::index;
@@ -249,20 +250,44 @@ fn run_inner(args: Args) -> Result<i32> {
             no_doc_drift,
             require_verification,
             json,
-        } => commands::python_fallback(
-            &ctx,
-            &args_with_flags(
-                "check",
-                &[
-                    ("--strict-index", strict_index),
-                    ("--no-staleness", no_staleness),
-                    ("--no-staged-coverage", no_staged_coverage),
-                    ("--no-doc-drift", no_doc_drift),
-                    ("--require-verification", require_verification),
-                    ("--json", json),
-                ],
-            ),
-        ),
+        } => {
+            let options = CheckOptions {
+                strict_index,
+                staleness: !no_staleness,
+                staged_coverage: !no_staged_coverage,
+                doc_drift: !no_doc_drift,
+                require_verification,
+            };
+            let (slice_count, result) = run_check(&ctx, options)?;
+            let ok = result.ok();
+            if json {
+                commands::emit_json(&check_output(slice_count, result, strict_index))?;
+            } else {
+                let status = if ok { "OK" } else { "FAILED" };
+                println!("{status}: checked {slice_count} slices");
+                if !result.errors.is_empty() {
+                    println!("Errors:");
+                    for error in &result.errors {
+                        println!("  - {error}");
+                    }
+                }
+                if !result.warnings.is_empty() {
+                    println!("Warnings:");
+                    for warning in &result.warnings {
+                        println!("  - {warning}");
+                    }
+                } else if ok {
+                    println!("Warnings: none");
+                }
+                if !result.hidden_warnings.is_empty() && !strict_index {
+                    println!(
+                        "({} index drift warnings hidden - use --strict-index to show)",
+                        result.hidden_warnings.len()
+                    );
+                }
+            }
+            Ok(i32::from(!ok))
+        }
         Command::SyncIndex { stdout, check } => index::sync_index(&ctx, stdout, check),
         Command::Stamp {
             doc_id,

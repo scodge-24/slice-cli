@@ -90,7 +90,7 @@ pub fn sync_index(ctx: &Context, stdout: bool, check: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn parse_index(ctx: &Context) -> (FxHashMap<String, IndexRow>, Vec<String>) {
+pub fn parse_index(ctx: &Context) -> (FxHashMap<String, IndexRow>, Vec<String>) {
     let mut rows = FxHashMap::default();
     let mut order = Vec::new();
     let Ok(content) = std::fs::read_to_string(ctx.index_path()) else {
@@ -124,11 +124,9 @@ fn parse_index(ctx: &Context) -> (FxHashMap<String, IndexRow>, Vec<String>) {
 }
 
 #[derive(Debug)]
-struct IndexRow {
-    #[allow(dead_code)]
-    description: String,
-    #[allow(dead_code)]
-    loc: Option<u64>,
+pub struct IndexRow {
+    pub description: String,
+    pub loc: Option<u64>,
 }
 
 fn parse_loc(raw: &str) -> Option<u64> {

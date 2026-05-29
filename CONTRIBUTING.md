@@ -6,7 +6,7 @@ that keep it simple and well-tested are very welcome.
 ## Dev setup
 
 ```bash
-git clone https://github.com/scodge/slice-cli && cd slice-cli
+git clone https://github.com/scodge-24/slice-cli && cd slice-cli
 pip install -e ".[dev]"
 pytest          # the suite builds throwaway git repos in tmp dirs (~10s)
 ```

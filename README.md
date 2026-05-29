@@ -12,9 +12,9 @@ against — so staleness is exact, and survives commits and rebases.
 ## Install
 
 ```bash
-pipx install git+https://github.com/scodge/slice-cli      # isolated, gives you `slice`
+pipx install git+https://github.com/scodge-24/slice-cli      # isolated, gives you `slice`
 # or, for development:
-git clone https://github.com/scodge/slice-cli && cd slice-cli
+git clone https://github.com/scodge-24/slice-cli && cd slice-cli
 pip install -e .
 ```
 

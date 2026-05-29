@@ -14,8 +14,8 @@ keywords = ["documentation", "staleness", "codebase", "agents", "cli"]
 dependencies = ["pyyaml>=6.0"]
 
 [project.urls]
-Homepage = "https://github.com/scodge/slice-cli"
-Source = "https://github.com/scodge/slice-cli"
+Homepage = "https://github.com/scodge-24/slice-cli"
+Source = "https://github.com/scodge-24/slice-cli"
 
 [project.scripts]
 slice = "slices_cli:main"

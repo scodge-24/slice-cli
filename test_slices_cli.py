@@ -855,3 +855,53 @@ class TestContextHelp:
         out = capsys.readouterr().out
         assert "--call-stacks" in out
         assert "--verification" in out
+
+
+# ---------------------------------------------------------------------------
+# Robustness: graceful errors, not-a-repo, env vars
+# ---------------------------------------------------------------------------
+
+class TestRobustness:
+    def test_malformed_docs_yaml_exits_2(self, repo: Path, capsys):
+        (repo / "slices" / "DOCS.yaml").write_text("docs: [1, 2, 3\nvault_root: ../docs\n")
+        rc = cli.main(["--repo", str(repo), "stale-docs"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "failed to parse" in err
+        assert "DOCS.yaml" in err
+        assert "Traceback" not in err
+
+    def test_malformed_slice_frontmatter_exits_2(self, repo: Path, capsys):
+        (repo / "slices" / "auth-service.md").write_text(
+            "---\nslice_id: [unclosed\n---\nbody\n"
+        )
+        rc = cli.main(["--repo", str(repo), "list"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "failed to parse" in err
+        assert "auth-service.md" in err
+
+    def test_not_a_git_repo_exits_2(self, tmp_path: Path, capsys, monkeypatch):
+        # No --repo, no SLICES_REPO_ROOT, cwd is not a git repo.
+        monkeypatch.delenv("SLICES_REPO_ROOT", raising=False)
+        monkeypatch.delenv("SLICES_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        rc = cli.main(["list"])
+        assert rc == 2
+        assert "git repository" in capsys.readouterr().err
+
+    def test_env_var_repo_root(self, repo: Path, tmp_path_factory, capsys, monkeypatch):
+        # SLICES_REPO_ROOT fallback when --repo is omitted.
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("SLICES_REPO_ROOT", str(repo))
+        monkeypatch.delenv("SLICES_DIR", raising=False)
+        assert cli.main(["list"]) == 0
+        assert "auth-service" in capsys.readouterr().out
+
+    def test_stale_docs_help_documents_exit_codes(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["stale-docs", "--help"])
+        out = capsys.readouterr().out
+        assert "exit codes:" in out
+        assert "stale" in out

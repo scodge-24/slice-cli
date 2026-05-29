@@ -179,6 +179,18 @@ def _string_list(raw: Any) -> tuple[str, ...]:
     return (str(raw).strip(),) if str(raw).strip() else ()
 
 
+def _parse_yaml(text: str, source: str) -> Any:
+    """yaml.safe_load with a clean, sourced error instead of a raw traceback.
+
+    Raises ValueError (caught by main() -> exit 2) naming the offending file.
+    """
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        detail = str(exc).replace("\n", " ")
+        raise ValueError(f"failed to parse {source}: {detail}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Loading — slices
 # ---------------------------------------------------------------------------
@@ -196,7 +208,7 @@ def load_slice_docs(ctx: Ctx) -> list[SliceDoc]:
         match = FRONTMATTER_RE.match(content)
         if not match:
             raise ValueError(f"{ctx.rel(doc_path)}: missing YAML frontmatter")
-        frontmatter = yaml.safe_load(match.group(1))
+        frontmatter = _parse_yaml(match.group(1), ctx.rel(doc_path))
         if not isinstance(frontmatter, dict):
             raise ValueError(f"{ctx.rel(doc_path)}: invalid YAML frontmatter")
         body = content[match.end():].strip()
@@ -230,7 +242,7 @@ def load_doc_manifest(ctx: Ctx) -> DocManifest:
     if not manifest_path.exists():
         return DocManifest(vault_root_raw=None, docs=[])
 
-    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw = _parse_yaml(manifest_path.read_text(encoding="utf-8"), ctx.rel(manifest_path))
     if not isinstance(raw, dict):
         return DocManifest(vault_root_raw=None, docs=[])
 
@@ -405,7 +417,7 @@ def load_config(ctx: Ctx) -> SliceConfig:
     path = ctx.slices_dir / "config.yaml"
     if not path.exists():
         return SliceConfig()
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = _parse_yaml(path.read_text(encoding="utf-8"), ctx.rel(path))
     if not isinstance(raw, dict):
         return SliceConfig()
     context = raw.get("context")
@@ -1574,7 +1586,7 @@ def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:
         match = FRONTMATTER_RE.match(content)
         fm: dict[str, Any] = {}
         if match:
-            parsed = yaml.safe_load(match.group(1))
+            parsed = _parse_yaml(match.group(1), rel_path)
             if isinstance(parsed, dict):
                 fm = parsed
 
@@ -1807,7 +1819,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_docs)
 
     # stale-docs
-    sp = sub.add_parser("stale-docs", help="List all stale docs across slices.")
+    sp = sub.add_parser(
+        "stale-docs", help="List all stale docs across slices.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "exit codes:\n"
+            "  0  all tracked docs are current\n"
+            "  1  one or more docs are stale (a status signal, not an error) —\n"
+            "     useful as a pre-commit/CI gate\n"
+            "\n"
+            "examples:\n"
+            "  slice stale-docs\n"
+            "  slice stale-docs --json"
+        ),
+    )
     _add_json(sp)
     sp.set_defaults(func=cmd_stale_docs)
 
@@ -1851,11 +1876,22 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except yaml.YAMLError as exc:
+        # Backstop — load sites wrap safe_load via _parse_yaml, but guard anyway.
+        print(f"error: malformed YAML: {str(exc).splitlines()[0]}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        if exc.filename == "git" or "git" in str(exc):
+            print("error: git not found on PATH — slice requires git. "
+                  "Install git and retry.", file=sys.stderr)
+        else:
+            print(f"error: file not found: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
 

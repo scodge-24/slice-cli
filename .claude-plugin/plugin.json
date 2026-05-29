@@ -1,0 +1,8 @@
+{
+  "name": "slice-cli",
+  "version": "0.1.0",
+  "description": "Codebase slicing for AI agents: generate slice definitions and track doc-code staleness. Bundles the slice-codebase skill and the codebase-slicer agent; the slice CLI ships at the plugin root.",
+  "author": {
+    "name": "scodge"
+  }
+}

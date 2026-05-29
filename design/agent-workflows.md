@@ -33,6 +33,12 @@ owners; `best_effort` prints all). Override per-call with `--strict` / `--best-e
 For section-specific output, use `slice show` flags: `--body`, `--system`,
 `--call-stacks` (Runtime Flows), `--verification` (Verification + Update Triggers).
 
+`Verification` holds structured V-model traceability links
+(`abstraction <- test::name`, plus an `upstream:` design-doc link), which
+`slice check` validates — dangling refs are errors, and
+`slice check --require-verification` flags abstractions with no link. Format:
+[`verification-links.md`](verification-links.md).
+
 **Agent action**: read the returned system context, then edit with the right mental
 model instead of stopping at metadata.
 

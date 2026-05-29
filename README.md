@@ -110,7 +110,10 @@ slice init --agent --global      # writes the skill + agent into ~/.claude
 `--global` makes slicing available in every repo on the machine; drop it to
 install into the current repo's `.claude/` only. Either way, then run
 `/slice-codebase` in the repo you want sliced. Generation needs an LSP-capable
-environment (the agent uses LSP to map call graphs).
+environment (the agent uses LSP to map call graphs). Generated slices carry
+call-stack mapping (`## Runtime Flows`) and V-model verification links
+(`## Verification`, validated by `slice check`) by default — see
+[`design/verification-links.md`](design/verification-links.md).
 
 ## Docs
 

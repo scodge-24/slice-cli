@@ -61,6 +61,30 @@ fn run_rust_raw(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
 }
 
 fn run_python_for_repo(repo: &Path, args: &[&str]) -> (i32, Value) {
+    let (status, stdout, stderr) = run_python_raw_for_repo(repo, args);
+    let value = serde_json::from_slice(&stdout).unwrap_or_else(|err| {
+        panic!(
+            "python output was not json: {err}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    });
+    (status, value)
+}
+
+fn run_rust_for_repo(repo: &Path, args: &[&str]) -> (i32, Value) {
+    let (status, stdout, stderr) = run_rust_raw_for_repo(repo, args);
+    let value = serde_json::from_slice(&stdout).unwrap_or_else(|err| {
+        panic!(
+            "rust output was not json: {err}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    });
+    (status, value)
+}
+
+fn run_python_raw_for_repo(repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let root = repo_root();
     let output = Command::new("python3")
         .args(["-m", "slice_cli", "--repo"])
@@ -70,17 +94,10 @@ fn run_python_for_repo(repo: &Path, args: &[&str]) -> (i32, Value) {
         .output()
         .expect("python slice command runs");
     let status = output.status.code().unwrap_or(1);
-    let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
-        panic!(
-            "python output was not json: {err}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    });
-    (status, value)
+    (status, output.stdout, output.stderr)
 }
 
-fn run_rust_for_repo(repo: &Path, args: &[&str]) -> (i32, Value) {
+fn run_rust_raw_for_repo(repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let output = Command::new(env!("CARGO_BIN_EXE_slice-rs"))
         .arg("--repo")
         .arg(repo)
@@ -88,14 +105,7 @@ fn run_rust_for_repo(repo: &Path, args: &[&str]) -> (i32, Value) {
         .output()
         .expect("rust slice command runs");
     let status = output.status.code().unwrap_or(1);
-    let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
-        panic!(
-            "rust output was not json: {err}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    });
-    (status, value)
+    (status, output.stdout, output.stderr)
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -213,6 +223,60 @@ fn delegated_and_subprocess_commands_match_python() {
     ] {
         assert_eq!(run_rust_raw(args), run_python_raw(args), "args: {args:?}");
     }
+}
+
+#[test]
+fn native_write_commands_match_python_observable_behavior() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+
+    assert_eq!(
+        run_rust_raw_for_repo(repo, &["sync-index", "--stdout"]),
+        run_python_raw_for_repo(repo, &["sync-index", "--stdout"])
+    );
+
+    let rust_stamp = run_rust_raw_for_repo(repo, &["stamp", "auth-guide"]);
+    assert_eq!(rust_stamp.0, 0);
+    assert!(String::from_utf8_lossy(&rust_stamp.1).contains("stamped auth-guide ->"));
+    assert_eq!(
+        run_rust_for_repo(repo, &["stale-docs", "--json"]),
+        (0, Value::Array(vec![]))
+    );
+    let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    assert!(manifest.contains("fingerprint: "));
+    assert!(manifest.contains("tags:\n    - auth\n"));
+
+    let bad_stamp = run_rust_raw_for_repo(repo, &["stamp", "missing-doc"]);
+    assert_eq!(bad_stamp.0, 1);
+    assert!(String::from_utf8_lossy(&bad_stamp.2).contains("no doc with id 'missing-doc'"));
+}
+
+#[test]
+fn native_docs_bootstrap_dry_run_and_write_match_python_shape() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    let vault = repo.join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    std::fs::write(
+        vault.join("guide.md"),
+        "---\ndoc_id: guide\ntracks:\n  - src/auth/middleware.py\ntags:\n  - auth\n---\n# Guide\n",
+    )
+    .unwrap();
+
+    let vault_arg = vault.to_string_lossy();
+    assert_eq!(
+        run_rust_raw_for_repo(repo, &["docs-bootstrap", &vault_arg, "--dry-run"]),
+        run_python_raw_for_repo(repo, &["docs-bootstrap", &vault_arg, "--dry-run"])
+    );
+    assert!(!repo.join("slices/DOCS.yaml").exists());
+
+    let written = run_rust_raw_for_repo(repo, &["docs-bootstrap", &vault_arg]);
+    assert_eq!(written.0, 0);
+    let docs = run_rust_for_repo(repo, &["docs", "auth-service", "--json"]);
+    assert_eq!(docs.0, 0);
+    assert_eq!(docs.1[0]["doc_id"], "guide");
+    assert_eq!(docs.1[0]["tags"][0], "auth");
 }
 
 #[test]

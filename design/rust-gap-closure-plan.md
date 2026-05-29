@@ -41,8 +41,8 @@ Implemented:
 - `context` JSON for slice/file resolution and standard sections
 - `affected-docs` for explicit paths
 - `stale-docs` with process-git attribution baseline
-- delegated bridges for `check`, `sync-index`, `stamp`, `docs-bootstrap`, and
-  `init`
+- native `sync-index`, `stamp`, and `docs-bootstrap`
+- delegated bridges for `check` and `init`
 
 Implemented test/monitoring support:
 
@@ -63,26 +63,24 @@ Progress:
   metacharacters.
 - Lane 3 now has a process-git attribution baseline for `stale-docs`, including
   a temp-repo parity test proving fingerprint drift narrows changed files.
-- Lane 6 command-surface coverage is bridged for `check`, `sync-index`,
-  `stamp`, `docs-bootstrap`, and `init` by delegating to the Python
-  implementation through the Rust CLI. This is a compatibility bridge, not the
-  final native-port acceptance state.
+- Lane 4 now has native Rust ports for `stamp`, `sync-index`, and
+  `docs-bootstrap`, including temp-repo tests for stdout, write mode, dry-run,
+  bad target exits, fingerprint stamping, and manifest loading.
+- Lane 6 command-surface coverage is bridged for `check` and `init` by
+  delegating to the Python implementation through the Rust CLI. This is a
+  compatibility bridge, not the final native-port acceptance state.
 
 ## Gaps
 
 Missing native Python-command ports:
 
 - `check`
-- `sync-index`
-- `stamp`
-- `docs-bootstrap`
 - `init`
 
 Partial behavior:
 
 - `grep` is native but still subprocess-based by design.
-- `check`, `sync-index`, `stamp`, `docs-bootstrap`, and `init` are currently
-  delegated bridge commands.
+- `check` and `init` are currently delegated bridge commands.
 - no git backend trait/native backend has landed.
 - glob/path behavior has basic parity coverage but not full Python fixture
   coverage.
@@ -334,7 +332,7 @@ If accepted:
 - [ ] Lane 2 - full Python fixture coverage
 - [x] Lane 3 - process-git staleness attribution baseline
 - [ ] Lane 3 - backend trait and native backend decision
-- [ ] Lane 4 - native write commands
+- [x] Lane 4 - native write commands
 - [ ] Lane 5 - native validation parity
 - [ ] Lane 6 - init, grep, distribution
 - [ ] Lane 7 - replacement decision

@@ -66,3 +66,52 @@ pub fn load_doc_manifest(ctx: &Context) -> Result<DocManifest> {
         docs,
     })
 }
+
+pub fn save_doc_manifest(manifest: &DocManifest, ctx: &Context) -> Result<()> {
+    let mut content = String::new();
+    if let Some(vault_root) = &manifest.vault_root_raw {
+        content.push_str("vault_root: ");
+        content.push_str(vault_root);
+        content.push('\n');
+    }
+    content.push_str("docs:\n");
+    for doc in &manifest.docs {
+        content.push_str("  ");
+        content.push_str(&doc.doc_id);
+        content.push_str(":\n");
+        content.push_str("    path: ");
+        content.push_str(&doc.path);
+        content.push('\n');
+        write_string_list(&mut content, "slices", &doc.slices);
+        content.push_str("    verified_at: ");
+        content.push_str(&doc.verified_at);
+        content.push('\n');
+        if !doc.fingerprint.is_empty() {
+            content.push_str("    fingerprint: ");
+            content.push_str(&doc.fingerprint);
+            content.push('\n');
+        }
+        write_optional_string_list(&mut content, "tags", &doc.tags);
+        write_optional_string_list(&mut content, "include", &doc.include);
+        write_optional_string_list(&mut content, "exclude", &doc.exclude);
+    }
+    let path = ctx.docs_manifest_path();
+    std::fs::write(&path, content).map_err(|source| Error::Write { path, source })
+}
+
+fn write_optional_string_list(content: &mut String, key: &str, values: &[String]) {
+    if !values.is_empty() {
+        write_string_list(content, key, values);
+    }
+}
+
+fn write_string_list(content: &mut String, key: &str, values: &[String]) {
+    content.push_str("    ");
+    content.push_str(key);
+    content.push_str(":\n");
+    for value in values {
+        content.push_str("    - ");
+        content.push_str(value);
+        content.push('\n');
+    }
+}

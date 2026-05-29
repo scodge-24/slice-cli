@@ -30,6 +30,13 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("failed to write output: {0}")]
     Output(#[from] serde_json::Error),
 

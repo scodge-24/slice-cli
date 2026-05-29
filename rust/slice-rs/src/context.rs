@@ -56,6 +56,27 @@ impl Context {
     }
 
     #[must_use]
+    pub fn index_path(&self) -> PathBuf {
+        self.slices_dir.join("INDEX.md")
+    }
+
+    #[must_use]
+    pub fn head_sha(&self) -> String {
+        let Ok(output) = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo_root)
+            .output()
+        else {
+            return "unknown".to_owned();
+        };
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        } else {
+            "unknown".to_owned()
+        }
+    }
+
+    #[must_use]
     pub fn rel(&self, path: &Path) -> String {
         path.strip_prefix(&self.repo_root).map_or_else(
             |_| path.to_string_lossy().into_owned(),

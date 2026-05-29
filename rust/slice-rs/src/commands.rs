@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{Ambiguity, load_ambiguity};
 use crate::context::Context;
-use crate::manifest::load_doc_manifest;
+use crate::manifest::{load_doc_manifest, save_doc_manifest};
 use crate::models::{
     AffectedDoc, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch, ListRow,
-    ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDocSummary,
+    ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc, TrackedDocSummary,
 };
 use crate::paths::{expand_literal_or_existing, matches_path, repo_join};
 use crate::slices::{docs_for_slice, load_slice_docs, owners_for_path, slice_for_selector};
@@ -527,6 +527,183 @@ pub fn stale_docs(ctx: &Context, json: bool) -> Result<i32> {
     Ok(i32::from(any_stale))
 }
 
+pub fn stamp(
+    ctx: &Context,
+    doc_id: Option<&str>,
+    slice_id: Option<&str>,
+    doc_path: Option<&str>,
+    stamp_all: bool,
+) -> Result<i32> {
+    let manifest = load_doc_manifest(ctx)?;
+    if manifest.docs.is_empty() {
+        eprintln!("no DOCS.yaml manifest found");
+        return Ok(2);
+    }
+    let head = ctx.head_sha();
+    if head == "unknown" {
+        eprintln!("cannot determine HEAD");
+        return Ok(2);
+    }
+    let short_sha = head.chars().take(12).collect::<String>();
+    let (targets, empty_code) =
+        stamp_targets(ctx, &manifest.docs, doc_id, slice_id, doc_path, stamp_all)?;
+    if targets.is_empty() {
+        return Ok(empty_code);
+    }
+
+    let slices = load_slice_docs(ctx)?;
+    let by_id = slices
+        .iter()
+        .map(|slice| (slice.slice_id.as_str(), slice))
+        .collect::<FxHashMap<_, _>>();
+    let target_ids = targets.into_iter().collect::<FxHashSet<_>>();
+    let mut updated = Vec::with_capacity(manifest.docs.len());
+    for mut doc in manifest.docs {
+        if target_ids.contains(doc.doc_id.as_str()) {
+            let concrete = resolve_tracked_files(&doc, &by_id)
+                .iter()
+                .flat_map(|file| expand_literal_or_existing(file, ctx))
+                .map(|file| ctx.git_relative_path(&file))
+                .collect::<Vec<_>>();
+            doc.verified_at.clone_from(&short_sha);
+            doc.fingerprint = content_fingerprint(ctx, &concrete);
+            println!("stamped {} -> {short_sha}", doc.doc_id);
+        }
+        updated.push(doc);
+    }
+    save_doc_manifest(
+        &crate::models::DocManifest {
+            vault_root_raw: manifest.vault_root_raw,
+            docs: updated,
+        },
+        ctx,
+    )?;
+    Ok(0)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors the small Python bootstrap command"
+)]
+pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: bool) -> Result<i32> {
+    let vault_dir = absolutize(vault_dir)?;
+    if !vault_dir.exists() {
+        eprintln!("vault directory not found: {}", vault_dir.display());
+        return Ok(2);
+    }
+
+    let slices = load_slice_docs(ctx)?;
+    let vault_root = relative_path(&vault_dir, ctx.slices_dir());
+    let mut entries = BTreeMap::<String, BootstrapEntry>::new();
+    let mut unresolved = Vec::<(String, String)>::new();
+    for md_file in markdown_files(&vault_dir)? {
+        let rel_path = md_file
+            .strip_prefix(&vault_dir)
+            .unwrap_or(md_file.as_path())
+            .to_string_lossy()
+            .into_owned();
+        let content = std::fs::read_to_string(&md_file).map_err(|source| Error::Read {
+            path: md_file.clone(),
+            source,
+        })?;
+        let frontmatter = parse_frontmatter_map(&content)?;
+        let doc_id = value_string(frontmatter.get("doc_id"))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                md_file
+                    .file_stem()
+                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned())
+            });
+        let mut slice_ids = Vec::new();
+        for track in string_list(frontmatter.get("tracks")) {
+            if track.to_lowercase().ends_with(".md") {
+                continue;
+            }
+            let resolved = resolve_track_to_slice_ids(&track, &slices, ctx);
+            if resolved.is_empty() {
+                unresolved.push((doc_id.clone(), track));
+            } else {
+                for sid in resolved {
+                    if !slice_ids.contains(&sid) {
+                        slice_ids.push(sid);
+                    }
+                }
+            }
+        }
+        slice_ids.sort();
+        entries.insert(
+            doc_id,
+            BootstrapEntry {
+                path: rel_path,
+                slices: slice_ids,
+                tags: string_list(frontmatter.get("tags")),
+            },
+        );
+    }
+
+    if entries.is_empty() {
+        eprintln!("no .md files found in vault");
+        return Ok(1);
+    }
+    if dry_run {
+        print_bootstrap_dry_run(&vault_root, &entries, &unresolved);
+        return Ok(0);
+    }
+    let manifest_path = ctx.docs_manifest_path();
+    if manifest_path.exists() && !force {
+        eprintln!(
+            "{} already exists - use --force to overwrite",
+            ctx.rel(&manifest_path)
+        );
+        return Ok(1);
+    }
+
+    let docs = entries
+        .iter()
+        .map(|(doc_id, entry)| TrackedDoc {
+            doc_id: doc_id.clone(),
+            path: entry.path.clone(),
+            slices: entry.slices.clone(),
+            verified_at: String::new(),
+            tags: entry.tags.clone(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            fingerprint: String::new(),
+        })
+        .collect();
+    save_doc_manifest(
+        &crate::models::DocManifest {
+            vault_root_raw: Some(vault_root),
+            docs,
+        },
+        ctx,
+    )?;
+    let mapped = entries
+        .values()
+        .filter(|entry| !entry.slices.is_empty())
+        .count();
+    println!("wrote {}", ctx.rel(&manifest_path));
+    println!("  docs:                {}", entries.len());
+    println!("  with slice mappings: {mapped}");
+    println!(
+        "  without mappings:    {}  (stamp manually or add slices)",
+        entries.len() - mapped
+    );
+    if !unresolved.is_empty() {
+        println!("  unresolved tracks:   {}", unresolved.len());
+        for (doc_id, track) in unresolved.iter().take(10) {
+            println!("    [{doc_id}] {track}");
+        }
+        if unresolved.len() > 10 {
+            println!(
+                "    ... and {} more (re-run with --dry-run to see all)",
+                unresolved.len() - 10
+            );
+        }
+    }
+    Ok(0)
+}
+
 pub fn python_fallback(ctx: &Context, command_args: &[String]) -> Result<i32> {
     let mut command = Command::new("python3");
     command
@@ -562,6 +739,193 @@ fn slice_cli_project_root() -> Option<&'static Path> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest_dir.parent()?.parent()?;
     root.join("slice_cli").is_dir().then_some(root)
+}
+
+fn stamp_targets(
+    ctx: &Context,
+    docs: &[TrackedDoc],
+    doc_id: Option<&str>,
+    slice_id: Option<&str>,
+    doc_path: Option<&str>,
+    stamp_all: bool,
+) -> Result<(Vec<String>, i32)> {
+    if let Some(doc_id) = doc_id {
+        let targets = docs
+            .iter()
+            .filter(|doc| doc.doc_id == doc_id)
+            .map(|doc| doc.doc_id.clone())
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            eprintln!("no doc with id '{doc_id}' in manifest");
+        }
+        return Ok((targets, 1));
+    }
+    if let Some(slice_id) = slice_id {
+        let targets = docs
+            .iter()
+            .filter(|doc| doc.slices.iter().any(|sid| sid == slice_id))
+            .map(|doc| doc.doc_id.clone())
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            eprintln!("no docs linked to slice '{slice_id}' in manifest");
+        }
+        return Ok((targets, 1));
+    }
+    if let Some(doc_path) = doc_path {
+        let targets = docs
+            .iter()
+            .filter(|doc| doc.path == doc_path)
+            .map(|doc| doc.doc_id.clone())
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            eprintln!("no doc with path '{doc_path}' in manifest");
+        }
+        return Ok((targets, 1));
+    }
+    if stamp_all {
+        return Ok((docs.iter().map(|doc| doc.doc_id.clone()).collect(), 0));
+    }
+
+    let slices = load_slice_docs(ctx)?;
+    let drifted = stale_docs_for(ctx, &slices, docs, StalenessMode::Attributed);
+    if drifted.is_empty() {
+        println!("all docs are up to date");
+    }
+    Ok((drifted.into_iter().map(|doc| doc.doc_id).collect(), 0))
+}
+
+#[derive(Debug)]
+struct BootstrapEntry {
+    path: String,
+    slices: Vec<String>,
+    tags: Vec<String>,
+}
+
+fn absolutize(path: &Path) -> Result<std::path::PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn markdown_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    collect_markdown_files(root, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_markdown_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn parse_frontmatter_map(content: &str) -> Result<FxHashMap<String, yaml_serde::Value>> {
+    let Some(frontmatter) = content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---").map(|end| &rest[..end]))
+    else {
+        return Ok(FxHashMap::default());
+    };
+    let value = yaml_serde::from_str(frontmatter).map_err(|source| Error::Yaml {
+        path: "frontmatter".to_owned(),
+        source,
+    })?;
+    let yaml_serde::Value::Mapping(mapping) = value else {
+        return Ok(FxHashMap::default());
+    };
+    let mut out = FxHashMap::default();
+    for (key, value) in mapping {
+        if let yaml_serde::Value::String(key) = key {
+            out.insert(key, value);
+        }
+    }
+    Ok(out)
+}
+
+fn string_list(value: Option<&yaml_serde::Value>) -> Vec<String> {
+    match value {
+        Some(yaml_serde::Value::Sequence(values)) => values
+            .iter()
+            .filter_map(|value| value_string(Some(value)))
+            .filter(|value| !value.is_empty())
+            .collect(),
+        Some(value) => value_string(Some(value)).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+fn value_string(value: Option<&yaml_serde::Value>) -> Option<String> {
+    match value? {
+        yaml_serde::Value::String(value) => Some(value.trim().to_owned()),
+        yaml_serde::Value::Number(value) => Some(value.to_string()),
+        yaml_serde::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_track_to_slice_ids(track: &str, slices: &[SliceDoc], ctx: &Context) -> Vec<String> {
+    let normalized = crate::paths::normalize_repo_path(track, ctx);
+    let dir_prefix = format!("{}/", normalized.trim_end_matches('/'));
+    let mut slice_ids = Vec::new();
+    for slice in slices {
+        let matched = slice.files.iter().any(|file| {
+            let file = crate::paths::normalize_repo_path(file, ctx);
+            file == normalized || matches_path(&file, &normalized) || file.starts_with(&dir_prefix)
+        });
+        if matched && !slice_ids.contains(&slice.slice_id) {
+            slice_ids.push(slice.slice_id.clone());
+        }
+    }
+    slice_ids.sort();
+    slice_ids
+}
+
+fn relative_path(path: &Path, base: &Path) -> String {
+    pathdiff::diff_paths(path, base)
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn print_bootstrap_dry_run(
+    vault_root: &str,
+    entries: &BTreeMap<String, BootstrapEntry>,
+    unresolved: &[(String, String)],
+) {
+    println!("vault_root: {vault_root}");
+    println!("docs found: {}", entries.len());
+    let mapped = entries
+        .values()
+        .filter(|entry| !entry.slices.is_empty())
+        .count();
+    println!("  with slice mappings: {mapped}");
+    println!("  without mappings:    {}", entries.len() - mapped);
+    println!();
+    for (doc_id, entry) in entries {
+        let slices = if entry.slices.is_empty() {
+            "(no slices)".to_owned()
+        } else {
+            entry.slices.join(", ")
+        };
+        println!("  {doc_id}");
+        println!("    path:   {}", entry.path);
+        println!("    slices: {slices}");
+    }
+    if !unresolved.is_empty() {
+        println!("\nunresolved tracks ({}):", unresolved.len());
+        for (doc_id, track) in unresolved {
+            println!("  [{doc_id}] {track}");
+        }
+    }
 }
 
 #[must_use]
@@ -915,7 +1279,7 @@ fn resolve_tracked_files(
     files
 }
 
-fn content_fingerprint(ctx: &Context, rel_paths: &[String]) -> String {
+pub(crate) fn content_fingerprint(ctx: &Context, rel_paths: &[String]) -> String {
     let mut unique = rel_paths.to_vec();
     unique.sort();
     unique.dedup();

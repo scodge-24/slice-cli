@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod index;
 pub mod manifest;
 pub mod models;
 pub mod paths;

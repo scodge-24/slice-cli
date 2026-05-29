@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
 use crate::Result;
 use crate::commands::{self, ShowMode};
 use crate::context::Context;
+use crate::index;
 
 #[derive(Debug, Parser)]
 #[command(name = "slice-rs", about = "Rust prototype for slice-cli hot paths.")]
@@ -262,20 +263,24 @@ fn run_inner(args: Args) -> Result<i32> {
                 ],
             ),
         ),
-        Command::SyncIndex { stdout, check } => {
-            commands::python_fallback(&ctx, &sync_index_args(stdout, check))
-        }
+        Command::SyncIndex { stdout, check } => index::sync_index(&ctx, stdout, check),
         Command::Stamp {
             doc_id,
             slice_id,
             doc,
             stamp_all,
-        } => commands::python_fallback(&ctx, &stamp_args(doc_id, slice_id, doc, stamp_all)),
+        } => commands::stamp(
+            &ctx,
+            doc_id.as_deref(),
+            slice_id.as_deref(),
+            doc.as_deref(),
+            stamp_all,
+        ),
         Command::DocsBootstrap {
             vault_dir,
             dry_run,
             force,
-        } => commands::python_fallback(&ctx, &docs_bootstrap_args(&vault_dir, dry_run, force)),
+        } => commands::docs_bootstrap(&ctx, &vault_dir, dry_run, force),
         Command::Init {
             hook,
             ci,
@@ -303,43 +308,6 @@ fn args_with_flags(command: &str, flags: &[(&str, bool)]) -> Vec<String> {
     for (flag, enabled) in flags {
         push_flag(&mut args, *enabled, flag);
     }
-    args
-}
-
-fn sync_index_args(stdout: bool, check: bool) -> Vec<String> {
-    let mut args = vec!["sync-index".to_owned()];
-    push_flag(&mut args, stdout, "--stdout");
-    push_flag(&mut args, check, "--check");
-    args
-}
-
-fn stamp_args(
-    doc_id: Option<String>,
-    slice_id: Option<String>,
-    doc: Option<String>,
-    stamp_all: bool,
-) -> Vec<String> {
-    let mut args = vec!["stamp".to_owned()];
-    if let Some(doc_id) = doc_id {
-        args.push(doc_id);
-    }
-    if let Some(slice_id) = slice_id {
-        args.extend(["--slice".to_owned(), slice_id]);
-    }
-    if let Some(doc) = doc {
-        args.extend(["--doc".to_owned(), doc]);
-    }
-    push_flag(&mut args, stamp_all, "--all");
-    args
-}
-
-fn docs_bootstrap_args(vault_dir: &Path, dry_run: bool, force: bool) -> Vec<String> {
-    let mut args = vec![
-        "docs-bootstrap".to_owned(),
-        vault_dir.to_string_lossy().into_owned(),
-    ];
-    push_flag(&mut args, dry_run, "--dry-run");
-    push_flag(&mut args, force, "--force");
     args
 }
 

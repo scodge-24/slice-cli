@@ -1130,3 +1130,116 @@ class TestCommandCoverage:
         rc = cli.main(["--repo", str(repo), "grep", "auth-service", "verify_token"])
         assert rc == 2
         assert "rg is required" in capsys.readouterr().err
+
+
+def _write_auth_slice_with_verification(
+    repo: Path, verification_lines: str, abstractions: list[str] | None = None
+) -> None:
+    """Rewrite auth-service.md with a `## Verification` section (and optional
+    frontmatter abstractions) for verification-link tests."""
+    fm = [
+        "---",
+        "slice_id: auth-service",
+        "description: Auth and sessions",
+        "loc: 30",
+        "files:",
+        "  - src/auth/middleware.py",
+        "  - src/auth/sessions.py",
+    ]
+    if abstractions:
+        fm.append("abstractions:")
+        fm.extend(f"  - {a}" for a in abstractions)
+    fm += ["dependencies: []", "---", "", "Auth slice body.", "",
+           "## Verification", "", verification_lines, ""]
+    (repo / "slices" / "auth-service.md").write_text("\n".join(fm))
+
+
+class TestVerificationLinks:
+    def test_parse_extracts_links_and_upstream(self):
+        body = textwrap.dedent("""\
+            ## Runtime Flows
+
+            request -> verify_token -> handler
+
+            ## Verification
+
+            - `verify_token` <- tests/test_auth.py::test_valid, tests/test_auth.py::test_expired
+            - `create_session` <- tests/test_sessions.py
+            - upstream: design/verification-links.md
+
+            ## Update Triggers
+
+            When the token contract changes.
+        """)
+        links, upstream = cli.parse_verification(body)
+        assert links == [
+            ("verify_token", ["tests/test_auth.py::test_valid", "tests/test_auth.py::test_expired"]),
+            ("create_session", ["tests/test_sessions.py"]),
+        ]
+        assert upstream == ["design/verification-links.md"]
+
+    def test_parse_ignores_freetext_and_missing_section(self):
+        assert cli.parse_verification("no sections here") == ([], [])
+        body = "## Verification\n\nExercise the token with a fresh and expired token.\n"
+        assert cli.parse_verification(body) == ([], [])
+
+    def test_normalize_abstraction_strips_description(self):
+        assert cli._normalize_abstraction("`verify_token` — checks JWT") == "verify_token"
+        assert cli._normalize_abstraction("create_session - makes a session") == "create_session"
+        assert cli._normalize_abstraction("SessionStore") == "SessionStore"
+
+    def test_valid_refs_pass(self, repo: Path, ctx: cli.Ctx):
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_auth.py").write_text("def test_valid(): pass\n")
+        _write_auth_slice_with_verification(
+            repo,
+            "- `verify_token` <- tests/test_auth.py::test_valid\n"
+            "- upstream: src/auth/middleware.py",
+        )
+        docs = cli.load_slice_docs(ctx)
+        result = cli.run_check(docs, ctx, staleness=False)
+        assert not any("verification ref missing" in e for e in result.errors)
+        assert not any("verification upstream missing" in e for e in result.errors)
+
+    def test_dangling_test_ref_is_error(self, repo: Path, ctx: cli.Ctx):
+        _write_auth_slice_with_verification(
+            repo, "- `verify_token` <- tests/test_missing.py::test_x"
+        )
+        docs = cli.load_slice_docs(ctx)
+        result = cli.run_check(docs, ctx, staleness=False)
+        assert any("verification ref missing: tests/test_missing.py" in e for e in result.errors)
+
+    def test_dangling_upstream_is_error(self, repo: Path, ctx: cli.Ctx):
+        _write_auth_slice_with_verification(
+            repo, "- upstream: design/does-not-exist.md"
+        )
+        docs = cli.load_slice_docs(ctx)
+        result = cli.run_check(docs, ctx, staleness=False)
+        assert any("verification upstream missing: design/does-not-exist.md" in e for e in result.errors)
+
+    def test_symbol_part_not_validated(self, repo: Path, ctx: cli.Ctx):
+        # Only the file is checked; a nonexistent ::symbol is fine.
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_auth.py").write_text("def test_valid(): pass\n")
+        _write_auth_slice_with_verification(
+            repo, "- `verify_token` <- tests/test_auth.py::no_such_symbol"
+        )
+        docs = cli.load_slice_docs(ctx)
+        result = cli.run_check(docs, ctx, staleness=False)
+        assert not any("verification ref missing" in e for e in result.errors)
+
+    def test_require_verification_flags_uncovered_abstraction(self, repo: Path, ctx: cli.Ctx):
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_auth.py").write_text("def test_valid(): pass\n")
+        _write_auth_slice_with_verification(
+            repo,
+            "- `verify_token` <- tests/test_auth.py::test_valid",
+            abstractions=["verify_token — checks JWT", "create_session — makes a session"],
+        )
+        docs = cli.load_slice_docs(ctx)
+        with_flag = cli.run_check(docs, ctx, staleness=False, require_verification=True)
+        assert any("abstraction not verified: create_session" in w for w in with_flag.warnings)
+        assert not any("abstraction not verified: verify_token" in w for w in with_flag.warnings)
+        # Silent without the opt-in flag.
+        without = cli.run_check(docs, ctx, staleness=False)
+        assert not any("abstraction not verified" in w for w in without.warnings)

@@ -394,6 +394,50 @@ def _present_sections(sections: dict[str, str], names: tuple[str, ...] | list[st
     return {n: t for n in names if (t := _section_text(sections, n))}
 
 
+def parse_verification(body: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Parse the `## Verification` section into V-model traceability links.
+
+    Returns (links, upstream) where links is [(abstraction, [ref, ...])] and
+    upstream is [doc_path, ...]. Each ref is the raw `path` or `path::symbol`
+    string as written. A `- ` bullet containing ` <- ` is a link; a `- upstream:`
+    bullet lists requirement/design-doc paths. Free-text lines are ignored, so
+    the section stays human-friendly. See design/verification-links.md.
+    """
+    section = _section_text(extract_sections(body), "Verification")
+    links: list[tuple[str, list[str]]] = []
+    upstream: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        item = stripped[2:].strip()
+        if item.lower().startswith("upstream:"):
+            rest = item[len("upstream:"):]
+            upstream.extend(p.strip().strip("`") for p in rest.split(",") if p.strip())
+        elif " <- " in item:
+            left, right = item.split(" <- ", 1)
+            abstraction = left.strip().strip("`")
+            refs = [r.strip().strip("`") for r in right.split(",") if r.strip()]
+            if abstraction and refs:
+                links.append((abstraction, refs))
+    return links, upstream
+
+
+def _normalize_abstraction(raw: str) -> str:
+    """Reduce an abstraction label to its bare symbol name for matching.
+
+    Frontmatter abstractions read like "verify_token — checks JWT"; verification
+    links reference just "verify_token". Strip backticks and any "— description"
+    (or " - description") tail.
+    """
+    name = raw.strip().strip("`")
+    for sep in ("—", " - "):
+        if sep in name:
+            name = name.split(sep, 1)[0]
+            break
+    return name.strip().strip("`")
+
+
 # ---------------------------------------------------------------------------
 # Config — slices/config.yaml
 # ---------------------------------------------------------------------------
@@ -888,6 +932,7 @@ def run_check(
     staleness: bool = True,
     staged_coverage: bool = True,
     doc_drift: bool = True,
+    require_verification: bool = False,
 ) -> CheckResult:
     root = ctx.repo_root
     result = CheckResult()
@@ -926,6 +971,29 @@ def run_check(
         for dep in d.dependencies:
             if dep not in by_id and not dep.startswith("external:"):
                 result.errors.append(f"{ctx.rel(d.doc_path)}: unknown dependency: {dep}")
+
+        # Verification links: dangling refs (and opt-in coverage gaps)
+        links, upstream = parse_verification(d.body)
+        for _, refs in links:
+            for ref in refs:
+                ref_file = ref.split("::", 1)[0]
+                if not (root / ref_file).exists():
+                    result.errors.append(
+                        f"{ctx.rel(d.doc_path)}: verification ref missing: {ref}"
+                    )
+        for up in upstream:
+            if not (root / up).exists():
+                result.errors.append(
+                    f"{ctx.rel(d.doc_path)}: verification upstream missing: {up}"
+                )
+        if require_verification and d.abstractions:
+            linked = {_normalize_abstraction(a) for a, _ in links}
+            for raw_abs in d.abstractions:
+                name = _normalize_abstraction(raw_abs)
+                if name and name not in linked:
+                    result.warnings.append(
+                        f"{ctx.rel(d.doc_path)}: abstraction not verified: {name}"
+                    )
 
     # --- File overlap detection ---
     file_owners: dict[str, str] = {}
@@ -1245,6 +1313,7 @@ def cmd_check(args: argparse.Namespace, ctx: Ctx) -> int:
         staleness=not args.no_staleness,
         staged_coverage=not args.no_staged_coverage,
         doc_drift=not args.no_doc_drift,
+        require_verification=args.require_verification,
     )
     hidden = result.hidden_warnings
     if args.json:
@@ -2205,6 +2274,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-staleness", action="store_true", help="Skip INDEX.md staleness check.")
     sp.add_argument("--no-staged-coverage", action="store_true", help="Skip staged coverage check.")
     sp.add_argument("--no-doc-drift", action="store_true", help="Skip doc staleness check.")
+    sp.add_argument("--require-verification", action="store_true",
+                    help="Warn on abstractions with no verification link (V-model coverage gap).")
     _add_json(sp)
     sp.set_defaults(func=cmd_check)
 

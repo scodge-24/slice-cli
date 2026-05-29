@@ -336,6 +336,92 @@ def _transitive_deps(start: str, adj: dict[str, tuple[str, ...]]) -> list[str]:
     return ordered
 
 
+# ---------------------------------------------------------------------------
+# Slice body sections (system context)
+# ---------------------------------------------------------------------------
+
+# Standard level-2 headings that hold durable system context in a slice body.
+STANDARD_SECTIONS: tuple[str, ...] = (
+    "System Behavior",
+    "Invariants",
+    "Runtime Flows",
+    "Verification",
+    "Update Triggers",
+)
+
+_H2_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$")
+
+
+def extract_sections(body: str) -> dict[str, str]:
+    """Parse level-2 (`## `) Markdown headings from a slice body.
+
+    Returns {heading: text} with outer blank lines trimmed. Deeper headings
+    (`###` and beyond) are ignored as section delimiters and stay in the text
+    of the section they fall under. Returns {} when no `## ` headings exist.
+    """
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in body.splitlines():
+        m = _H2_RE.match(line)
+        if m:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip("\n")
+            current = m.group(1).strip()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip("\n")
+    return sections
+
+
+def _section_text(sections: dict[str, str], name: str) -> str:
+    """Case-insensitive lookup of a section by standard name. '' if absent."""
+    target = name.lower()
+    for heading, text in sections.items():
+        if heading.lower() == target:
+            return text
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Config — slices/config.yaml
+# ---------------------------------------------------------------------------
+
+_AMBIGUITY_VALUES = ("strict", "best_effort")
+
+
+@dataclass(frozen=True)
+class SliceConfig:
+    """Contents of slices/config.yaml. Missing file defaults to strict."""
+    ambiguity: str = "strict"
+
+
+def load_config(ctx: Ctx) -> SliceConfig:
+    """Load slices/config.yaml. Absent file -> strict defaults.
+
+    Raises ValueError on an invalid context.ambiguity value, naming the bad
+    value, the allowed values, and the config path.
+    """
+    path = ctx.slices_dir / "config.yaml"
+    if not path.exists():
+        return SliceConfig()
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return SliceConfig()
+    context = raw.get("context")
+    if not isinstance(context, dict):
+        return SliceConfig()
+    ambiguity = str(context.get("ambiguity", "strict")).strip() or "strict"
+    if ambiguity not in _AMBIGUITY_VALUES:
+        raise ValueError(
+            f"invalid context.ambiguity '{ambiguity}' in {ctx.rel(path)}; "
+            f"allowed: {', '.join(_AMBIGUITY_VALUES)}"
+        )
+    return SliceConfig(ambiguity=ambiguity)
+
+
 def _owners_for_path(docs: list[SliceDoc], raw_path: str, ctx: Ctx) -> list[SliceDoc]:
     normalized = _normalize_repo_path(raw_path, ctx)
     owners = []
@@ -913,8 +999,53 @@ def cmd_list(args: argparse.Namespace, ctx: Ctx) -> int:
     return 0
 
 
+def _requested_section_names(args: argparse.Namespace) -> list[str]:
+    """Ordered, de-duplicated standard sections requested by show flags."""
+    names: list[str] = []
+    if getattr(args, "system", False):
+        names.extend(STANDARD_SECTIONS)
+    if getattr(args, "call_stacks", False):
+        names.append("Runtime Flows")
+    if getattr(args, "verification", False):
+        names.extend(("Verification", "Update Triggers"))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
+def _emit_slice_sections(d: SliceDoc, args: argparse.Namespace) -> int:
+    """Output for `slice show` section/body flags (--body/--system/etc)."""
+    if args.body:
+        if args.json:
+            _emit_json({"slice_id": d.slice_id, "body": d.body})
+        else:
+            print(d.body)
+        return 0
+
+    sections = extract_sections(d.body)
+    names = _requested_section_names(args)
+    if args.json:
+        present = {n: _section_text(sections, n) for n in names if _section_text(sections, n)}
+        _emit_json({"slice_id": d.slice_id, "sections": present})
+        return 0
+    for n in names:
+        text = _section_text(sections, n)
+        print(f"{n}:")
+        print(text if text else "  (not present)")
+        print()
+    return 0
+
+
 def cmd_show(args: argparse.Namespace, ctx: Ctx) -> int:
     d = _resolve_slice(load_slice_docs(ctx), args.selector)
+    # Section/body mode — backward compatible: only engages when one of
+    # --body/--system/--call-stacks/--verification is set.
+    if args.body or args.system or args.call_stacks or args.verification:
+        return _emit_slice_sections(d, args)
     manifest = load_doc_manifest(ctx)
     tracked = _docs_for_slice(manifest.docs, d.slice_id)
     data = {
@@ -1219,6 +1350,106 @@ def cmd_docs(args: argparse.Namespace, ctx: Ctx) -> int:
     return 0
 
 
+def _context_payload(d: SliceDoc, docs_list: list[TrackedDoc],
+                      drifted_ids: set[str], ctx: Ctx) -> dict[str, Any]:
+    sections = extract_sections(d.body)
+    return {
+        "slice_id": d.slice_id,
+        "description": d.description,
+        "doc_path": ctx.rel(d.doc_path),
+        "files": list(d.files),
+        "dependencies": list(d.dependencies),
+        "docs": [
+            {"doc_id": td.doc_id, "path": td.path,
+             "verified_at": td.verified_at, "stale": td.doc_id in drifted_ids}
+            for td in docs_list
+        ],
+        "sections": {
+            n: _section_text(sections, n)
+            for n in STANDARD_SECTIONS if _section_text(sections, n)
+        },
+    }
+
+
+def _print_context_human(d: SliceDoc, docs_list: list[TrackedDoc],
+                         drifted_ids: set[str], has_manifest: bool, ctx: Ctx) -> None:
+    print(f"slice: {d.slice_id}")
+    print(f"description: {d.description}")
+    print(f"doc: {ctx.rel(d.doc_path)}")
+    print(f"files: {', '.join(d.files) if d.files else '(none)'}")
+    print(f"dependencies: {', '.join(d.dependencies) if d.dependencies else '(none)'}")
+    if has_manifest:
+        print("linked docs:")
+        if docs_list:
+            for td in docs_list:
+                status = "STALE" if td.doc_id in drifted_ids else "ok   "
+                print(f"  [{status}] {td.doc_id}  ({td.path})  (verified: {td.verified_at or '(never)'})")
+        else:
+            print("  (none)")
+    sections = extract_sections(d.body)
+    for n in STANDARD_SECTIONS:
+        text = _section_text(sections, n)
+        print(f"{n}:")
+        print(text if text else "  (not present)")
+    print()
+
+
+def cmd_context(args: argparse.Namespace, ctx: Ctx) -> int:
+    """One-command orientation: resolve a file path (or slice id) to its owning
+    slice and print metadata, linked-doc staleness, and standard system sections.
+    """
+    slices = load_slice_docs(ctx)
+    config = load_config(ctx)
+    if args.strict:
+        ambiguity = "strict"
+    elif args.best_effort:
+        ambiguity = "best_effort"
+    else:
+        ambiguity = config.ambiguity
+
+    owners = _owners_for_path(slices, args.selector, ctx)
+    if owners:
+        if len(owners) > 1:
+            owners = sorted(owners, key=lambda s: s.slice_id)
+            if ambiguity == "strict":
+                ids = ", ".join(o.slice_id for o in owners)
+                print(
+                    f"ambiguous: multiple slices own "
+                    f"{_normalize_repo_path(args.selector, ctx)}: {ids}",
+                    file=sys.stderr,
+                )
+                return 1
+        targets = owners
+    else:
+        try:
+            targets = [_resolve_slice(slices, args.selector)]
+        except KeyError:
+            print(f"no owning slice for: {_normalize_repo_path(args.selector, ctx)}",
+                  file=sys.stderr)
+            return 1
+
+    manifest = load_doc_manifest(ctx)
+    has_manifest = bool(manifest.docs)
+    drifted_ids: set[str] = set()
+    if has_manifest:
+        drifted_ids = {dr.doc_id for dr in check_doc_drift(manifest.docs, slices, ctx)}
+
+    if args.json:
+        _emit_json({
+            "slices": [
+                _context_payload(d, _docs_for_slice(manifest.docs, d.slice_id),
+                                 drifted_ids, ctx)
+                for d in targets
+            ]
+        })
+        return 0
+
+    for d in targets:
+        _print_context_human(d, _docs_for_slice(manifest.docs, d.slice_id),
+                             drifted_ids, has_manifest, ctx)
+    return 0
+
+
 def cmd_affected_docs(args: argparse.Namespace, ctx: Ctx) -> int:
     """Given changed file paths, find docs that may need updating."""
     slices = load_slice_docs(ctx)
@@ -1431,10 +1662,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_list)
 
     # show
-    sp = sub.add_parser("show", help="Show one slice.")
+    sp = sub.add_parser(
+        "show", help="Show one slice (metadata, or body sections with flags).",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice show auth-service\n"
+            "  slice show auth-service --body\n"
+            "  slice show auth-service --system\n"
+            "  slice show auth-service --call-stacks\n"
+            "  slice show auth-service --verification"
+        ),
+    )
     _add_selector(sp)
+    sec = sp.add_mutually_exclusive_group()
+    sec.add_argument("--body", action="store_true", help="Print the full Markdown body.")
+    sec.add_argument("--system", action="store_true",
+                     help="Print all standard system sections.")
+    sec.add_argument("--call-stacks", action="store_true", dest="call_stacks",
+                     help="Print the Runtime Flows section only.")
+    sec.add_argument("--verification", action="store_true",
+                     help="Print the Verification and Update Triggers sections.")
     _add_json(sp)
-    sp.set_defaults(func=cmd_show)
+    sp.set_defaults(func=cmd_show, body=False, system=False,
+                    call_stacks=False, verification=False)
 
     # files
     sp = sub.add_parser("files", help="List files owned by a slice.")
@@ -1456,6 +1707,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", help="Repo-relative or absolute path.")
     _add_json(sp)
     sp.set_defaults(func=cmd_for)
+
+    # context
+    sp = sub.add_parser(
+        "context",
+        help="Resolve a file path or slice to its owning slice + system context.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice context src/auth/middleware.py\n"
+            "  slice context auth-service --call-stacks  # via slice show flags\n"
+            "  slice context src/auth/middleware.py --best-effort\n"
+            "\n"
+            "ambiguity: config slices/config.yaml -> context.ambiguity "
+            "(strict | best_effort);\ndefault strict. Override with --strict / --best-effort."
+        ),
+    )
+    sp.add_argument("selector", help="Repo-relative/absolute file path, or a slice id/doc stem.")
+    amb = sp.add_mutually_exclusive_group()
+    amb.add_argument("--strict", action="store_true",
+                     help="Fail on multiple owning slices (overrides config).")
+    amb.add_argument("--best-effort", action="store_true", dest="best_effort",
+                     help="Print all owning slices on ambiguity (overrides config).")
+    _add_json(sp)
+    sp.set_defaults(func=cmd_context, strict=False, best_effort=False)
 
     # find
     sp = sub.add_parser("find", help="Search slices by keyword.")

@@ -598,3 +598,216 @@ class TestAffectedDocs:
         doc_ids = {d["doc_id"] for d in data}
         assert "auth-guide" in doc_ids
         assert "api-ref" in doc_ids
+
+
+# ---------------------------------------------------------------------------
+# Slice-context feature: section extraction, `show` flags, `slice context`
+# ---------------------------------------------------------------------------
+
+_SECTION_BODY = textwrap.dedent("""\
+    Intro prose about the auth slice.
+
+    ## System Behavior
+    Verifies JWTs and manages in-memory sessions.
+
+    ## Invariants
+    Tokens expire after one hour.
+
+    ## Runtime Flows
+    request -> verify_token -> session lookup -> handler
+
+    ## Verification
+    Run: pytest tests/test_auth.py
+
+    ## Update Triggers
+    When middleware.py or sessions.py change.
+""")
+
+
+def _add_sections(repo: Path) -> None:
+    """Rewrite the auth-service slice body with standard system sections."""
+    p = repo / "slices" / "auth-service.md"
+    fm = textwrap.dedent("""\
+        ---
+        slice_id: auth-service
+        description: Auth and sessions
+        loc: 30
+        files:
+          - src/auth/middleware.py
+          - src/auth/sessions.py
+        dependencies: []
+        ---
+        """)
+    p.write_text(fm + _SECTION_BODY)
+
+
+def _add_second_owner(repo: Path) -> None:
+    """Add a second slice that also owns middleware.py (ambiguous ownership)."""
+    (repo / "slices" / "auth-extra.md").write_text(textwrap.dedent("""\
+        ---
+        slice_id: auth-extra
+        description: Extra auth view
+        loc: 5
+        files:
+          - src/auth/middleware.py
+        dependencies: []
+        ---
+        Extra slice body.
+    """))
+
+
+class TestSectionExtraction:
+    def test_extract_parses_h2_headings(self):
+        sections = cli.extract_sections(_SECTION_BODY)
+        assert sections["System Behavior"].startswith("Verifies JWTs")
+        assert "session lookup" in sections["Runtime Flows"]
+        assert "pytest" in sections["Verification"]
+
+    def test_extract_ignores_h3_as_delimiter(self):
+        body = "## Runtime Flows\nstep one\n### sub\ndetail\n"
+        sections = cli.extract_sections(body)
+        assert list(sections) == ["Runtime Flows"]
+        assert "### sub" in sections["Runtime Flows"]
+
+    def test_extract_empty_without_headings(self):
+        assert cli.extract_sections("just prose, no headings") == {}
+
+
+class TestShowSections:
+    def test_show_body_includes_full_body(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--body"]) == 0
+        out = capsys.readouterr().out
+        assert "## System Behavior" in out
+        assert "Intro prose" in out
+
+    def test_show_system_only_standard_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system"]) == 0
+        out = capsys.readouterr().out
+        assert "System Behavior:" in out
+        assert "Update Triggers:" in out
+        # metadata fields should NOT appear in section mode
+        assert "doc_path:" not in out
+
+    def test_show_call_stacks_only_runtime_flows(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--call-stacks"]) == 0
+        out = capsys.readouterr().out
+        assert "Runtime Flows:" in out
+        assert "System Behavior:" not in out
+
+    def test_show_verification_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--verification"]) == 0
+        out = capsys.readouterr().out
+        assert "Verification:" in out
+        assert "Update Triggers:" in out
+        assert "Runtime Flows:" not in out
+
+    def test_show_missing_section_does_not_fail(self, repo: Path, capsys):
+        # default fixture body has no standard sections
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system"]) == 0
+        assert "(not present)" in capsys.readouterr().out
+
+    def test_show_json_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--system", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["slice_id"] == "auth-service"
+        assert "Runtime Flows" in data["sections"]
+
+    def test_plain_show_unchanged(self, repo: Path, capsys):
+        # backward compat: no flags -> metadata output with doc_path
+        assert cli.main(["--repo", str(repo), "show", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["doc_path"].endswith("auth-service.md")
+        assert "sections" not in data
+
+
+class TestContext:
+    def test_context_by_file_resolves_slice(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"]) == 0
+        out = capsys.readouterr().out
+        assert "slice: auth-service" in out
+
+    def test_context_by_slice_json_sections(self, repo: Path, capsys):
+        _add_sections(repo)
+        assert cli.main(["--repo", str(repo), "context", "auth-service", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert len(data["slices"]) == 1
+        s = data["slices"][0]
+        assert s["slice_id"] == "auth-service"
+        assert "Runtime Flows" in s["sections"]
+        assert s["docs"][0]["doc_id"] == "auth-guide"
+
+    def test_context_missing_sections_ok(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "context", "auth-service"]) == 0
+        assert "(not present)" in capsys.readouterr().out
+
+    def test_context_no_owner_fails(self, repo: Path, capsys):
+        rc = cli.main(["--repo", str(repo), "context", "src/nope/missing.py"])
+        assert rc == 1
+        assert "no owning slice" in capsys.readouterr().err
+
+    def test_context_strict_ambiguous_fails(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "ambiguous" in err
+        assert "auth-extra" in err and "auth-service" in err
+
+
+class TestContextConfig:
+    def test_missing_config_defaults_strict(self, repo: Path):
+        _add_second_owner(repo)
+        # no config.yaml -> strict -> ambiguous file errors
+        assert cli.main(["--repo", str(repo), "context", "src/auth/middleware.py"]) == 1
+
+    def test_config_best_effort_allows_multi_owner(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: best_effort\n")
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        ids = {s["slice_id"] for s in data["slices"]}
+        assert ids == {"auth-extra", "auth-service"}
+
+    def test_cli_strict_overrides_best_effort_config(self, repo: Path, capsys):
+        _add_second_owner(repo)
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: best_effort\n")
+        rc = cli.main(["--repo", str(repo), "context", "src/auth/middleware.py", "--strict"])
+        assert rc == 1
+        assert "ambiguous" in capsys.readouterr().err
+
+    def test_invalid_config_value_fails(self, repo: Path, capsys):
+        (repo / "slices" / "config.yaml").write_text("context:\n  ambiguity: loose\n")
+        rc = cli.main(["--repo", str(repo), "context", "auth-service"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "loose" in err
+        assert "strict" in err and "best_effort" in err
+        assert "config.yaml" in err
+
+
+class TestContextHelp:
+    def test_help_advertises_context(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["--help"])
+        assert "context" in capsys.readouterr().out
+
+    def test_context_help_has_examples(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["context", "--help"])
+        out = capsys.readouterr().out
+        assert "examples:" in out
+        assert "slice context" in out
+        assert "best-effort" in out
+
+    def test_show_help_has_section_flags(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["show", "--help"])
+        out = capsys.readouterr().out
+        assert "--call-stacks" in out
+        assert "--verification" in out

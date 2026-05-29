@@ -11,6 +11,31 @@ Obsidian CLI/API is never required. All agent workflows work headlessly.
 
 ## Core Workflows
 
+### 0. "I'm about to edit this file — what should I know?"
+
+The orientation entry point. Run before editing an unfamiliar file. One command
+resolves the owning slice and returns its metadata, linked-doc staleness, and the
+durable system context held in the slice body.
+
+```bash
+slice context src/auth/middleware.py
+```
+
+Returns: owning slice, files, dependencies, linked docs with stale/current status
+(when `DOCS.yaml` exists), then the standard body sections — `System Behavior`,
+`Invariants`, `Runtime Flows`, `Verification`, `Update Triggers`. Add `--json` for
+a stable `{"slices": [...]}` payload.
+
+Ambiguous ownership (a file owned by more than one slice) follows
+`slices/config.yaml` → `context.ambiguity` (`strict` default fails and lists the
+owners; `best_effort` prints all). Override per-call with `--strict` / `--best-effort`.
+
+For section-specific output, use `slice show` flags: `--body`, `--system`,
+`--call-stacks` (Runtime Flows), `--verification` (Verification + Update Triggers).
+
+**Agent action**: read the returned system context, then edit with the right mental
+model instead of stopping at metadata.
+
 ### 1. "I changed code — what docs need attention?"
 
 The most common agent workflow. Run after modifying source files.

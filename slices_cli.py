@@ -1679,6 +1679,110 @@ def cmd_docs_bootstrap(args: argparse.Namespace, ctx: Ctx) -> int:
 
 
 # ---------------------------------------------------------------------------
+# init — wire slice-cli into a repo
+# ---------------------------------------------------------------------------
+
+_INIT_BLOCK_START = "<!-- slice-cli:start -->"
+_INIT_BLOCK_END = "<!-- slice-cli:end -->"
+
+_AGENT_INSTRUCTIONS = """\
+## slice-cli
+
+This repo tracks whether design docs are stale relative to the code they
+describe, via `slice` (slice-cli) and `slices/DOCS.yaml`.
+
+- Before editing an unfamiliar file, run `slice context <path>` to see the
+  owning slice, its system context, and any stale linked docs.
+- After changing source, run `slice affected-docs <changed-files>` to see which
+  docs may need updating. Update stale docs, then `slice stamp <doc-id>` to mark
+  them verified.
+- `slice stale-docs` lists everything currently stale (exit 1 if any are stale).
+"""
+
+_HOOK_SCRIPT = """\
+#!/bin/sh
+# Installed by `slice init --hook`. Warns about stale docs; never blocks a commit.
+if command -v slice >/dev/null 2>&1; then
+    if ! slice stale-docs >/dev/null 2>&1; then
+        echo "slice-cli: some tracked docs are stale — run 'slice stale-docs' to review." >&2
+    fi
+fi
+exit 0
+"""
+
+_CI_WORKFLOW = """\
+name: slice staleness
+on: [push, pull_request]
+jobs:
+  staleness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: python slices_cli.py check
+"""
+
+
+def _render_agent_block() -> str:
+    return f"{_INIT_BLOCK_START}\n{_AGENT_INSTRUCTIONS}{_INIT_BLOCK_END}\n"
+
+
+def _upsert_block(existing: str, block: str) -> str:
+    """Insert or replace the marked slice-cli block. Idempotent."""
+    if _INIT_BLOCK_START in existing and _INIT_BLOCK_END in existing:
+        start = existing.index(_INIT_BLOCK_START)
+        end = existing.index(_INIT_BLOCK_END) + len(_INIT_BLOCK_END)
+        # consume a trailing newline after the end marker if present
+        tail = existing[end:]
+        if tail.startswith("\n"):
+            tail = tail[1:]
+        return existing[:start] + block + tail
+    sep = "" if existing == "" or existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+    return existing + sep + block
+
+
+def cmd_init(args: argparse.Namespace, ctx: Ctx) -> int:
+    """Wire slice-cli into a repo: agent-instruction block, optional hook + CI."""
+    root = ctx.repo_root
+    block = _render_agent_block()
+    planned: list[tuple[Path, str]] = []
+
+    # Agent-instruction files: always CLAUDE.md; AGENTS.md too if it exists.
+    agent_files = [root / "CLAUDE.md"]
+    if (root / "AGENTS.md").exists():
+        agent_files.append(root / "AGENTS.md")
+    if args.global_:
+        agent_files = [Path.home() / ".claude" / "CLAUDE.md"]
+    for path in agent_files:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        planned.append((path, _upsert_block(existing, block)))
+
+    if args.hook:
+        planned.append((root / ".git" / "hooks" / "pre-commit", _HOOK_SCRIPT))
+    if args.ci:
+        planned.append((root / ".github" / "workflows" / "slice-staleness.yml", _CI_WORKFLOW))
+
+    if args.dry_run:
+        for path, _ in planned:
+            print(f"would write: {ctx.rel(path) if root in path.parents or path == root else path}")
+        return 0
+
+    for path, content in planned:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        if path.name == "pre-commit":
+            path.chmod(0o755)
+        rel = ctx.rel(path) if str(path).startswith(str(root)) else str(path)
+        print(f"wrote {rel}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -1840,6 +1944,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "stamp",
         help="Mark docs verified: record a content fingerprint of their tracked sources.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "Records a content fingerprint of each doc's tracked files (the staleness\n"
+            "anchor) plus the HEAD short-SHA as a note. Works on a dirty tree.\n"
+            "\n"
+            "examples:\n"
+            "  slice stamp auth-guide        # stamp one doc by id\n"
+            "  slice stamp --slice auth-service\n"
+            "  slice stamp                   # stamp every currently-stale doc"
+        ),
     )
     sp.add_argument("doc_id", nargs="?", default=None, help="Stamp a specific doc by doc_id.")
     sp.add_argument("--slice", metavar="SLICE_ID", help="Stamp all docs for a slice.")
@@ -1849,7 +1963,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_stamp)
 
     # affected-docs
-    sp = sub.add_parser("affected-docs", help="Find docs affected by changed file paths.")
+    sp = sub.add_parser(
+        "affected-docs", help="Find docs affected by changed file paths.",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice affected-docs src/auth/middleware.py\n"
+            "  slice affected-docs $(git diff --name-only) --json\n"
+            "\n"
+            "exit codes: 0 = no affected docs stale, 1 = one or more affected docs stale."
+        ),
+    )
     sp.add_argument("paths", nargs="+", metavar="PATH", help="Changed file paths.")
     _add_json(sp)
     sp.set_defaults(func=cmd_affected_docs)
@@ -1863,6 +1987,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="Print what would be written without writing.")
     sp.add_argument("--force", action="store_true", help="Overwrite existing DOCS.yaml.")
     sp.set_defaults(func=cmd_docs_bootstrap)
+
+    # init
+    sp = sub.add_parser(
+        "init",
+        help="Wire slice-cli into this repo (agent instructions, optional hook/CI).",
+        formatter_class=RichHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  slice init                 # add the agent-instruction block to CLAUDE.md/AGENTS.md\n"
+            "  slice init --hook          # also install a pre-commit staleness reminder\n"
+            "  slice init --hook --ci     # also add a GitHub Actions staleness check\n"
+            "  slice init --dry-run       # preview without writing\n"
+            "\n"
+            "The agent block is wrapped in <!-- slice-cli:start/end --> markers and is\n"
+            "idempotent — re-running updates it in place."
+        ),
+    )
+    sp.add_argument("--hook", action="store_true",
+                    help="Install a git pre-commit hook that warns about stale docs.")
+    sp.add_argument("--ci", action="store_true",
+                    help="Write a GitHub Actions workflow running `slice check`.")
+    sp.add_argument("--global", action="store_true", dest="global_",
+                    help="Write the agent block to your user-level ~/.claude/CLAUDE.md instead.")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print what would be written without writing.")
+    sp.set_defaults(func=cmd_init)
 
     return p
 

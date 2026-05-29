@@ -905,3 +905,62 @@ class TestRobustness:
         out = capsys.readouterr().out
         assert "exit codes:" in out
         assert "stale" in out
+
+
+# ---------------------------------------------------------------------------
+# slice init — repo adoption
+# ---------------------------------------------------------------------------
+
+class TestInit:
+    def test_init_writes_agent_block(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init"]) == 0
+        text = (repo / "CLAUDE.md").read_text()
+        assert "<!-- slice-cli:start -->" in text
+        assert "<!-- slice-cli:end -->" in text
+        assert "slice context" in text
+
+    def test_init_idempotent(self, repo: Path):
+        cli.main(["--repo", str(repo), "init"])
+        cli.main(["--repo", str(repo), "init"])
+        text = (repo / "CLAUDE.md").read_text()
+        assert text.count("<!-- slice-cli:start -->") == 1
+        assert text.count("<!-- slice-cli:end -->") == 1
+
+    def test_init_preserves_existing_claudemd(self, repo: Path):
+        (repo / "CLAUDE.md").write_text("# My Project\n\nExisting instructions.\n")
+        cli.main(["--repo", str(repo), "init"])
+        text = (repo / "CLAUDE.md").read_text()
+        assert "Existing instructions." in text
+        assert "<!-- slice-cli:start -->" in text
+
+    def test_init_hook(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init", "--hook"]) == 0
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        assert hook.exists()
+        assert "stale-docs" in hook.read_text()
+        import os
+        assert os.access(hook, os.X_OK)
+
+    def test_init_ci(self, repo: Path):
+        assert cli.main(["--repo", str(repo), "init", "--ci"]) == 0
+        wf = repo / ".github" / "workflows" / "slice-staleness.yml"
+        assert wf.exists()
+        assert "slice staleness" in wf.read_text()
+
+    def test_init_dry_run_writes_nothing(self, repo: Path, capsys):
+        assert cli.main(["--repo", str(repo), "init", "--dry-run"]) == 0
+        assert not (repo / "CLAUDE.md").exists()
+        assert "would write" in capsys.readouterr().out
+
+    def test_init_updates_agents_md_when_present(self, repo: Path):
+        (repo / "AGENTS.md").write_text("# Agents\n")
+        cli.main(["--repo", str(repo), "init"])
+        assert "<!-- slice-cli:start -->" in (repo / "AGENTS.md").read_text()
+        assert "<!-- slice-cli:start -->" in (repo / "CLAUDE.md").read_text()
+
+    def test_init_help_examples(self, capsys):
+        with pytest.raises(SystemExit):
+            cli.main(["init", "--help"])
+        out = capsys.readouterr().out
+        assert "examples:" in out
+        assert "--hook" in out and "--ci" in out

@@ -35,6 +35,11 @@ This keeps durable system knowledge in `slices/*.md`, not a new docs layer.
 
 ## Key Changes
 
+> **Lane C update:** The generation side of this plan (making the `codebase-slicer`
+> agent actually write these headings) shipped separately — see
+> [[verification-links]], which also upgrades `## Verification` from prose to
+> structured, `slice check`-validated V-model traceability links.
+
 - Add standard Markdown headings for durable slice body content:
   - `## System Behavior`
   - `## Invariants`

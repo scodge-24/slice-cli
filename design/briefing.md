@@ -88,7 +88,7 @@ For each doc in the manifest:
 | `slice stale-docs [--json]` | List all stale docs with affected slices and changed files |
 | `slice affected-docs <path>... [--json]` | Given changed files, which docs need attention? Exits 1 only when an affected doc is stale. |
 | `slice docs <slice-id> [--json]` | Which docs track this slice? Show staleness. |
-| `slice stamp [doc-id] [--slice id] [--doc path]` | Mark doc(s) as verified at HEAD; refuses when tracked source files are uncommitted |
+| `slice stamp [doc-id] [--slice id] [--doc path]` | Mark doc(s) verified: records a content fingerprint of their tracked files (works on a dirty tree) |
 | `slice check` | Full validation including doc drift warnings |
 
 ### What Each Layer Owns

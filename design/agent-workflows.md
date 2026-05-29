@@ -130,7 +130,7 @@ slice stamp --slice auth-service
 slice stamp --all
 ```
 
-Stamp updates `verified_at` in DOCS.yaml to the current HEAD SHA. It refuses to stamp a doc while that doc's tracked source files are staged or unstaged against `HEAD`, because such a stamp would point at the wrong commit.
+Stamp records a content `fingerprint` of the doc's tracked source files in DOCS.yaml (the staleness anchor), plus the current HEAD short-SHA as a human-readable note. It works whether or not the changes are committed — the fingerprint captures the exact verified content, so it stays correct across later commits and rebases.
 
 ### 5. "Find docs about a topic"
 

@@ -97,19 +97,13 @@ class Ctx:
             return "unknown"
 
     def source_fingerprint(self, docs: list[SliceDoc]) -> str:
-        head = self.head_sha()
-        dirty = dirty_slice_source_paths(docs, self)
-        if not dirty:
-            return head
-        # Dirty worktree: blend HEAD with a content hash of the dirty sources so
-        # INDEX staleness reflects uncommitted edits. Shares the hashing
-        # primitive with doc-staleness fingerprints (_content_fingerprint).
-        digest = hashlib.sha256()
-        digest.update(b"slice-source-v1\0")
-        digest.update(head.encode())
-        digest.update(b"\0")
-        digest.update(_content_fingerprint(dirty, self.repo_root).encode())
-        return digest.hexdigest()
+        # Content hash of every slice source (slice .md files + their tracked
+        # files), read from the working tree. Identical in clean and dirty
+        # states, so INDEX staleness reflects uncommitted edits AND stays stable
+        # across a sync-while-dirty -> commit flow (the committed contents hash
+        # the same). Shares the primitive with doc-staleness fingerprints.
+        paths = list(_slice_source_paths(docs, self))
+        return _content_fingerprint(paths, self.repo_root)
 
     def rel(self, path: Path) -> str:
         try:
@@ -512,27 +506,6 @@ def _parse_index(ctx: Ctx) -> tuple[dict[str, dict[str, Any]], list[str]]:
         }
         order.append(sid)
     return rows, order
-
-
-def dirty_slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> list[str]:
-    relevant = _slice_source_paths(docs, ctx)
-    dirty: list[str] = []
-    try:
-        proc = ctx.git("status", "--porcelain=v1", "-z", "--untracked-files=all", check=False)
-    except (OSError, FileNotFoundError):
-        return dirty
-
-    entries = proc.stdout.split("\0")
-    for entry in entries:
-        if not entry:
-            continue
-        path = entry[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        normalized = _normalize_repo_path(path, ctx)
-        if normalized in relevant:
-            dirty.append(normalized)
-    return dirty
 
 
 def _slice_source_paths(docs: list[SliceDoc], ctx: Ctx) -> set[str]:
@@ -1723,8 +1696,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyyaml
-      - run: python slices_cli.py check
+      # Install the slice CLI. Swap for a pinned version or a git source as needed:
+      #   pip install slice-cli==0.1.0
+      #   pip install git+https://github.com/scodge-24/slice-cli
+      - run: pip install slice-cli
+      - run: slice check
 """
 
 
@@ -1868,8 +1844,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "examples:\n"
             "  slice context src/auth/middleware.py\n"
-            "  slice context auth-service --call-stacks  # via slice show flags\n"
+            "  slice context auth-service --json\n"
             "  slice context src/auth/middleware.py --best-effort\n"
+            "\n"
+            "for a single body section, use slice show:\n"
+            "  slice show auth-service --call-stacks\n"
             "\n"
             "ambiguity: config slices/config.yaml -> context.ambiguity "
             "(strict | best_effort);\ndefault strict. Override with --strict / --best-effort."

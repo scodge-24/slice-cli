@@ -481,12 +481,22 @@ class TestCheck:
     def test_source_fingerprint_tracks_dirty_slice_sources(self, repo: Path, ctx: cli.Ctx):
         docs = cli.load_slice_docs(ctx)
         clean = ctx.source_fingerprint(docs)
-        assert clean == ctx.head_sha()
+        assert len(clean) == 64  # content hash, clean or dirty
 
         (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return False\n")
         dirty = ctx.source_fingerprint(docs)
         assert dirty != clean
         assert len(dirty) == 64
+
+    def test_index_fingerprint_stable_across_dirty_then_commit(self, repo: Path, ctx: cli.Ctx):
+        # REGRESSION (review): sync while dirty, then commit the same content.
+        # INDEX must NOT report stale afterward — the content hash is unchanged.
+        (repo / "src" / "auth" / "middleware.py").write_text("def verify_token(): return 1\n")
+        assert cli.main(["--repo", str(repo), "sync-index"]) == 0
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "edit"], cwd=repo, capture_output=True, check=True)
+        docs = cli.load_slice_docs(ctx)
+        assert not any("INDEX.md stale" in w for w in cli.run_check(docs, ctx).warnings)
 
     def test_staleness_uses_source_fingerprint_for_dirty_worktree(self, repo: Path, ctx: cli.Ctx):
         assert cli.main(["--repo", str(repo), "sync-index"]) == 0

@@ -10,17 +10,17 @@ Two independent systems collaborate through a shared manifest to solve documenta
  │ Content authoring     │               │ Code slice ownership │
  │ [[wikilinks]]         │               │ files[], deps        │
  │ Tags, search, graph   │               │ Staleness detection  │
- │ doc_id in frontmatter │               │ Git SHA comparison   │
+ │ doc_id in frontmatter │               │ Content fingerprints │
  └──────────┬────────────┘               └──────────┬───────────┘
             │                                       │
             └──────── DOCS.yaml (bridge) ───────────┘
                      doc_id → slice IDs
-                     verified_at SHA
+                     fingerprint (+ verified_at note)
 ```
 
 **Obsidian** owns documentation content: prose, hierarchy via `[[wikilinks]]`, tags, search, human visualization. A vault is a directory of `.md` files with YAML frontmatter — fully functional without Obsidian running.
 
-**Slice CLI** owns the code-to-doc bridge: which docs track which code slices, whether they're stale (via git SHA comparison), and which docs are affected by a code change. The manifest lives in `slices/DOCS.yaml`.
+**Slice CLI** owns the code-to-doc bridge: which docs track which code slices, whether they're stale (by comparing a content fingerprint of each doc's tracked files against the fingerprint recorded at verification time; a git SHA-diff is the legacy fallback for entries with no fingerprint), and which docs are affected by a code change. The manifest lives in `slices/DOCS.yaml`.
 
 **Neither system depends on the other.** Agents work headlessly with direct file reads and the slice CLI. Obsidian adds visualization and search for humans. The vault is portable plain markdown.
 

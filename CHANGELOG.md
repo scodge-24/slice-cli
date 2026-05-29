@@ -19,6 +19,11 @@ First public release.
   `Update Triggers`).
 - `slice show` section flags: `--body`, `--system`, `--call-stacks`,
   `--verification`.
+- **V-model verification links** in the `## Verification` section: structured
+  `abstraction <- test::name` traceability links plus an `upstream:` design-doc
+  link. `slice check` validates them (dangling test/upstream refs are errors),
+  and `slice check --require-verification` warns on abstractions with no link
+  (opt-in coverage gap). Format: `design/verification-links.md`.
 - `slice affected-docs`, `slice stale-docs`, `slice stamp`, `slice check`,
   `slice sync-index`, `slice docs`, `slice docs-bootstrap`.
 - `slice init` — wire slice-cli into a repo (idempotent agent-instruction block
@@ -29,6 +34,11 @@ First public release.
 - Bundles the `slice-codebase` skill and `codebase-slicer` agent that scan a
   repo and write slice definitions (`/slice-codebase`), no longer tied to a
   private plugin.
+- Generated slices now include call-stack mapping (`## Runtime Flows`) and
+  V-model verification links (`## Verification`) by default — the refine agent
+  derives the links from the `incomingCalls` it already traces, filtered to
+  test files. `## Update Triggers` is also written; `System Behavior` /
+  `Invariants` stay agent-discretion.
 - The repo is an installable Claude Code plugin:
   `claude plugin marketplace add scodge-24/slice-cli`.
 - `slice init --agent [--global]` installs the skill + agent into `.claude/`

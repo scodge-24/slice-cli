@@ -1,6 +1,6 @@
 use std::fs;
 
-use rustc_hash::FxHashMap;
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::context::Context;
@@ -10,7 +10,7 @@ use crate::{Error, Result};
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     vault_root: Option<String>,
-    docs: Option<FxHashMap<String, RawTrackedDoc>>,
+    docs: Option<IndexMap<String, RawTrackedDoc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +46,7 @@ pub fn load_doc_manifest(ctx: &Context) -> Result<DocManifest> {
     })?;
     let raw: RawManifest =
         yaml_serde::from_str(&content).map_err(|source| Error::Yaml { path: rel, source })?;
-    let mut docs = raw
+    let docs = raw
         .docs
         .unwrap_or_default()
         .into_iter()
@@ -61,7 +61,6 @@ pub fn load_doc_manifest(ctx: &Context) -> Result<DocManifest> {
             fingerprint: doc.fingerprint,
         })
         .collect::<Vec<_>>();
-    docs.sort_by(|a, b| a.doc_id.cmp(&b.doc_id));
     Ok(DocManifest {
         vault_root_raw: raw.vault_root,
         docs,

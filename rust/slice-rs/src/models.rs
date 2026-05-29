@@ -84,6 +84,13 @@ pub struct DepsOutput<'a> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FindMatch<'a> {
+    pub description: &'a str,
+    pub matches: Vec<&'static str>,
+    pub slice_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AffectedDoc {
     pub changed_files: Vec<String>,
     pub doc_id: String,
@@ -123,4 +130,13 @@ pub struct ContextDoc {
     pub path: String,
     pub stale: bool,
     pub verified_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SliceDocStatus<'a> {
+    pub doc_id: &'a str,
+    pub path: &'a str,
+    pub stale: bool,
+    pub tags: &'a [String],
+    pub verified_at: &'a str,
 }

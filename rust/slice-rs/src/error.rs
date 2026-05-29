@@ -33,6 +33,9 @@ pub enum Error {
     #[error("failed to write output: {0}")]
     Output(#[from] serde_json::Error),
 
+    #[error("{0}")]
+    InvalidInput(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

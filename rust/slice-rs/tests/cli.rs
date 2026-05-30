@@ -1443,10 +1443,15 @@ fn browse_forwards_query_and_quotes_preview_paths() {
         recorded.lines().any(|l| l == "auth"),
         "query value forwarded"
     );
-    // The preview command interpolates the repo path single-quoted (shell-safe).
+    // The preview command interpolates the repo path single-quoted (shell-safe), colors
+    // the preview, and uses `--` so a leading-dash slice id can't be read as a flag.
     assert!(
-        recorded.contains("--repo '") && recorded.contains("show {1}"),
-        "preview must shell-quote the repo path: {recorded}"
+        recorded.contains("--repo '") && recorded.contains("show -- {1}"),
+        "preview must shell-quote the repo path and `--`-guard the id: {recorded}"
+    );
+    assert!(
+        recorded.contains("--color=always"),
+        "default browse colors the preview: {recorded}"
     );
     // Each lens key maps to the RIGHT action (not just that the flag appears somewhere).
     let bound = |key: &str, action_contains: &str| {
@@ -1454,17 +1459,20 @@ fn browse_forwards_query_and_quotes_preview_paths() {
             .lines()
             .any(|line| line.starts_with(&format!("{key}:")) && line.contains(action_contains))
     };
-    assert!(bound("ctrl-o", "show {1}"), "ctrl-o → overview: {recorded}");
     assert!(
-        bound("ctrl-r", "show {1} --call-stacks"),
+        bound("ctrl-o", "show -- {1}"),
+        "ctrl-o → overview: {recorded}"
+    );
+    assert!(
+        bound("ctrl-r", "show --call-stacks -- {1}"),
         "ctrl-r → call-stacks: {recorded}"
     );
     assert!(
-        bound("ctrl-d", "show {1} --verification"),
+        bound("ctrl-d", "show --verification -- {1}"),
         "ctrl-d → verification: {recorded}"
     );
     assert!(
-        bound("ctrl-t", "deps {1} --reverse"),
+        bound("ctrl-t", "deps --reverse -- {1}"),
         "ctrl-t → reverse-deps: {recorded}"
     );
     // The old picker binds are gone (ctrl-d is now verification, not direct-deps).

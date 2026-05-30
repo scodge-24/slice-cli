@@ -10,6 +10,7 @@ name = "slice"
 path = "src/main.rs"
 
 [dependencies]
+anstyle = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 indexmap = { version = "2", features = ["serde"] }

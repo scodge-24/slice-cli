@@ -1167,3 +1167,171 @@ fn context_and_show_help_are_covered() {
     assert!(stdout_text(&show_help).contains("--system"));
     assert!(stdout_text(&show_help).contains("--verification"));
 }
+
+// ---------------------------------------------------------------------------
+// Lane A — color (TTY-gated; tests run with piped stdout, so `auto` is OFF)
+// ---------------------------------------------------------------------------
+
+/// Strip CSI escape sequences (ESC '[' ... final-byte in @..~) for plain-text asserts.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// True if every ESC in `text` introduces an SGR sequence (`ESC [ ... m`) — no OSC
+/// (`ESC ]`) or cursor codes. This is the contract fzf `--ansi` relies on for previews.
+fn ansi_is_sgr_only(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            if i + 1 >= bytes.len() || bytes[i + 1] != b'[' {
+                return false; // not a CSI introducer (e.g. OSC `ESC ]`)
+            }
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i >= bytes.len() || bytes[i] != b'm' {
+                return false; // CSI final byte is not 'm' → not SGR
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
+fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, Vec<u8>, Vec<u8>) {
+    let root = repo_root();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_slice"));
+    command.args(["--repo", "examples/mock-repo"]).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .current_dir(&root)
+        .output()
+        .expect("rust slice command runs");
+    (
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    )
+}
+
+#[test]
+fn color_always_emits_ansi_and_strips_to_plain() {
+    let out = stdout_text(&run_rust_raw(&["list", "--color=always"]));
+    assert!(
+        out.contains('\u{1b}'),
+        "expected ANSI escapes with --color=always"
+    );
+    assert!(strip_ansi(&out).contains("auth-service"));
+}
+
+#[test]
+fn color_never_and_default_auto_are_plain() {
+    // Explicit never.
+    let never = stdout_text(&run_rust_raw(&["list", "--color=never"]));
+    assert!(!never.contains('\u{1b}'), "never must not color");
+    // Default auto over a pipe (tests capture stdout) must also be plain.
+    let auto = stdout_text(&run_rust_raw(&["list"]));
+    assert!(!auto.contains('\u{1b}'), "auto over a pipe must not color");
+}
+
+#[test]
+fn color_global_flag_parses_in_any_position() {
+    // Trailing (after the subcommand) and leading (before it) both work.
+    let trailing = stdout_text(&run_rust_raw(&["list", "--color=always"]));
+    let leading = stdout_text(&run_rust_raw(&["--color=always", "list"]));
+    assert!(trailing.contains('\u{1b}') && leading.contains('\u{1b}'));
+    assert_eq!(strip_ansi(&trailing), strip_ansi(&leading));
+}
+
+#[test]
+fn color_strip_equals_never_for_each_command() {
+    for args in [
+        vec!["list"],
+        vec!["show", "auth-service"],
+        vec!["find", "auth"],
+        vec!["stale-docs"],
+    ] {
+        let mut always = args.clone();
+        always.push("--color=always");
+        let mut never = args.clone();
+        never.push("--color=never");
+        let always_out = stdout_text(&run_rust_raw(&always));
+        let never_out = stdout_text(&run_rust_raw(&never));
+        assert_eq!(
+            strip_ansi(&always_out),
+            never_out,
+            "strip_ansi(always) must equal never for {args:?}"
+        );
+    }
+}
+
+#[test]
+fn no_color_env_is_overridden_by_explicit_always() {
+    let out = run_with_env(&["list", "--color=always"], &[("NO_COLOR", "1")]);
+    assert!(
+        stdout_text(&out).contains('\u{1b}'),
+        "--color=always overrides NO_COLOR"
+    );
+}
+
+#[test]
+fn json_is_byte_identical_under_color_always() {
+    for cmd in [
+        vec!["list", "--json"],
+        vec!["show", "auth-service", "--json"],
+    ] {
+        let plain = run_rust_raw(&cmd).1;
+        let mut colored = cmd.clone();
+        colored.insert(cmd.len() - 1, "--color=always");
+        let with_color = run_rust_raw(&colored).1;
+        assert_eq!(
+            plain, with_color,
+            "--json must be byte-identical regardless of --color"
+        );
+    }
+}
+
+#[test]
+fn show_preview_output_is_sgr_only() {
+    // fzf `--ansi` previews of `show --color=always` require SGR-only escapes.
+    let out = stdout_text(&run_rust_raw(&["show", "auth-service", "--color=always"]));
+    assert!(
+        out.contains('\u{1b}'),
+        "expected color in the preview output"
+    );
+    assert!(
+        ansi_is_sgr_only(&out),
+        "show preview must emit only SGR escapes"
+    );
+}
+
+#[test]
+fn list_marks_stale_doc_count() {
+    // The mock repo's auth-guide is stale (see docs_reports_stale_state), so `list`
+    // surfaces a stale badge on auth-service.
+    let out = stdout_text(&run_rust_raw(&["list", "--color=always"]));
+    assert!(
+        strip_ansi(&out).contains("stale]"),
+        "expected a [N stale] badge in list"
+    );
+}

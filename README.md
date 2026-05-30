@@ -89,6 +89,10 @@ stamped auth-guide -> 5fb503f...
 
 Run `slice <command> -h` for examples and flags.
 
+Human output (`list`/`show`/`find`/`stale-docs`) is colored when stdout is a
+terminal; control it with the global `--color=auto|always|never`. Pipes and
+`--json` are never colored, and `NO_COLOR` is honored.
+
 ## Use it in your own repo
 
 ```bash

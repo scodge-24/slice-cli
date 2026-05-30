@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod cli;
+pub mod color;
 pub mod commands;
 pub mod config;
 pub mod context;

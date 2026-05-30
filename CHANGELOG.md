@@ -10,10 +10,14 @@ First public release.
 
 ### Features
 - Slice navigation: `list`, `show`, `files`, `deps`, `for`, `find`, `grep`.
+- `slice show` renders the slice's **overview** — the prose lede before the first
+  `##` section — as a block under `description` (and as an `overview` field in
+  `--json`), so the slice's orientation prose is visible without `--body`.
 - `slice browse` — an interactive `fzf` picker (optional `fzf` >= 0.30 dependency)
-  fed from structured slice data, with a live preview pane (`ctrl-f`/`ctrl-d`/`ctrl-s`
-  switch between files/deps/show). `enter` shows the slice; `--print` emits the
-  selected id for piping (`id=$(slice browse --print) && slice show "$id"`).
+  fed from structured slice data, with a live wrapped preview pane and lens keys:
+  `ctrl-o` overview, `ctrl-r` runtime call-stacks, `ctrl-v` verification, `ctrl-t`
+  reverse deps. `enter` shows the slice; `--print` emits the selected id for piping
+  (`id=$(slice browse --print) && slice show "$id"`).
 - **Terminal color** on human output (`list`/`show`/`find`/`stale-docs`), gated by a
   global `--color=auto|always|never` flag. `auto` (the default) colors only when
   stdout is a terminal and honors `NO_COLOR`; pipes and the `--json` path are never

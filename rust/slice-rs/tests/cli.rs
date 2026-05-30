@@ -1448,6 +1448,43 @@ fn browse_forwards_query_and_quotes_preview_paths() {
         recorded.contains("--repo '") && recorded.contains("show {1}"),
         "preview must shell-quote the repo path: {recorded}"
     );
+    // Each lens key maps to the RIGHT action (not just that the flag appears somewhere).
+    let bound = |key: &str, action_contains: &str| {
+        recorded
+            .lines()
+            .any(|line| line.starts_with(&format!("{key}:")) && line.contains(action_contains))
+    };
+    assert!(bound("ctrl-o", "show {1}"), "ctrl-o → overview: {recorded}");
+    assert!(
+        bound("ctrl-r", "show {1} --call-stacks"),
+        "ctrl-r → call-stacks: {recorded}"
+    );
+    assert!(
+        bound("ctrl-v", "show {1} --verification"),
+        "ctrl-v → verification: {recorded}"
+    );
+    assert!(
+        bound("ctrl-t", "deps {1} --reverse"),
+        "ctrl-t → reverse-deps: {recorded}"
+    );
+    // The old binds are gone.
+    for stale in ["ctrl-f:", "ctrl-d:", "ctrl-s:"] {
+        assert!(
+            !recorded.lines().any(|l| l.starts_with(stale)),
+            "stale bind {stale} present"
+        );
+    }
+    // Preview wraps, and the header is passed.
+    assert!(
+        recorded.lines().any(|l| l.contains("wrap")),
+        "preview-window must wrap"
+    );
+    assert!(
+        recorded
+            .lines()
+            .any(|l| l.contains("overview") && l.contains("used-by")),
+        "header passed"
+    );
 }
 
 #[test]

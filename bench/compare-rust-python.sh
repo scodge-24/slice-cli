@@ -7,7 +7,7 @@ REPO="${REPO:-examples/mock-repo}"
 SHOW_SLICE="${SHOW_SLICE:-auth-service}"
 PATH_ARG="${PATH_ARG:-src/auth/middleware.py}"
 OUT="${OUT:-$ROOT/bench/rust-baseline.md}"
-RUST_BIN="$ROOT/rust/slice-rs/target/release/slice-rs"
+RUST_BIN="$ROOT/rust/slice-rs/target/release/slice"
 
 cd "$ROOT"
 cargo build --release --manifest-path rust/slice-rs/Cargo.toml >/dev/null

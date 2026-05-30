@@ -1,0 +1,59 @@
+name: Release
+
+# Builds prebuilt `slice` binaries for each platform and attaches them to a
+# GitHub Release when a version tag is pushed (e.g. `git tag v0.1.0 && git push --tags`).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/slice-rs
+      - name: Build
+        run: cargo build --release --locked --manifest-path rust/slice-rs/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin="rust/slice-rs/target/${{ matrix.target }}/release/slice"
+          tar -czf "slice-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" slice
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          bin="rust/slice-rs/target/${{ matrix.target }}/release/slice.exe"
+          7z a "slice-${{ matrix.target }}.zip" "$bin"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            slice-${{ matrix.target }}.tar.gz
+            slice-${{ matrix.target }}.zip
+          fail_on_unmatched_files: false

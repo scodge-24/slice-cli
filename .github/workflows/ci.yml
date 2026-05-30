@@ -6,54 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Configure git (tests build temp repos)
-        run: |
-          git config --global user.email ci@example.com
-          git config --global user.name CI
-      - run: pip install -e ".[dev]"
-      - run: pytest
-
-  typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pyright slice_cli test_slices_cli.py
-
-  wheel-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Configure git (smoke commands inspect repo state)
-        run: |
-          git config --global user.email ci@example.com
-          git config --global user.name CI
-      - run: pip install build
-      - run: python -m build
-      - run: python -m venv /tmp/slice-wheel-smoke
-      - run: /tmp/slice-wheel-smoke/bin/pip install dist/*.whl
-      - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo list --json
-      - run: /tmp/slice-wheel-smoke/bin/slice --repo examples/mock-repo init --agent --dry-run
-      - run: python -m slice_cli --repo examples/mock-repo list --json
-
-  rust-prototype:
+  # Primary gate: the shipped `slice` binary.
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,12 +18,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/slice-rs
+      # Python is the parity test oracle (parity.rs shells out to `python -m slice_cli`).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Configure git (tests build temp repos)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
       - run: pip install -e ".[dev]"
       - run: cargo fmt --check --manifest-path rust/slice-rs/Cargo.toml
       - run: cargo clippy --manifest-path rust/slice-rs/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path rust/slice-rs/Cargo.toml
       - run: cargo build --release --manifest-path rust/slice-rs/Cargo.toml
-      - run: rust/slice-rs/target/release/slice-rs --repo examples/mock-repo list --json
+      - run: rust/slice-rs/target/release/slice --repo examples/mock-repo list --json
+
+  # Oracle correctness: the Python implementation backs the Rust parity tests
+  # until Rust's snapshot coverage is self-sufficient (then this job is removed).
+  python-oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Configure git (tests build temp repos)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+      - run: pip install -e ".[dev]"
+      - run: pytest
+      - run: pyright slice_cli test_slices_cli.py

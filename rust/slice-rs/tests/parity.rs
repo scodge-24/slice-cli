@@ -50,7 +50,7 @@ fn run_python_raw(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
 
 fn run_rust_raw(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let root = repo_root();
-    let output = Command::new(env!("CARGO_BIN_EXE_slice-rs"))
+    let output = Command::new(env!("CARGO_BIN_EXE_slice"))
         .args(["--repo", "examples/mock-repo"])
         .args(args)
         .current_dir(&root)
@@ -98,7 +98,7 @@ fn run_python_raw_for_repo(repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>
 }
 
 fn run_rust_raw_for_repo(repo: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
-    let output = Command::new(env!("CARGO_BIN_EXE_slice-rs"))
+    let output = Command::new(env!("CARGO_BIN_EXE_slice"))
         .arg("--repo")
         .arg(repo)
         .args(args)
@@ -595,7 +595,7 @@ fn fingerprint_staleness_narrows_changed_files_like_python() {
     let temp = fixture_repo();
     let repo = temp.path();
 
-    let stamp = Command::new(env!("CARGO_BIN_EXE_slice-rs"))
+    let stamp = Command::new(env!("CARGO_BIN_EXE_slice"))
         .arg("--repo")
         .arg(repo)
         .args(["stamp", "auth-guide"])

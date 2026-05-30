@@ -17,8 +17,9 @@ dependencies = ["pyyaml>=6.0"]
 Homepage = "https://github.com/scodge-24/slice-cli"
 Source = "https://github.com/scodge-24/slice-cli"
 
-[project.scripts]
-slice = "slice_cli.cli:main"
+# No `slice` console script: the shipped `slice` command is the Rust binary
+# (rust/slice-rs). The Python package is retained only as the parity test oracle
+# and is invoked as `python -m slice_cli`.
 
 [project.optional-dependencies]
 dev = ["build>=1", "pytest>=7", "pyright>=1.1"]

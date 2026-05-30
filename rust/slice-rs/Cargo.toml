@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# The installed/shipped command is `slice` (the Rust binary is the primary CLI).
+[[bin]]
+name = "slice"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

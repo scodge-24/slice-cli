@@ -4,7 +4,7 @@ All notable changes to slice-cli are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 semantic versioning.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-05-31
 
 First public release.
 

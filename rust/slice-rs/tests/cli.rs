@@ -217,6 +217,12 @@ fn read_only_json_outputs_are_native_snapshots() {
         run_rust(&["show", "auth-service", "--json"]).1["docs"][0],
         json!({"doc_id":"auth-guide","path":"auth-guide.md","tags":["auth","middleware","security"],"verified_at":"57e4d1a4caf7"})
     );
+    // The additive `overview` field carries the lede (positive assertion — a
+    // contains-only check would not notice a missing/empty field).
+    assert_eq!(
+        run_rust(&["show", "auth-service", "--json"]).1["overview"],
+        "Handles JWT verification, the `require_auth` decorator, and in-memory session\nlifecycle. Entry points are `verify_token` and `require_auth` in middleware,\nplus `create_session`/`get_session`/`destroy_session` in sessions."
+    );
     assert_eq!(
         run_rust(&["show", "auth-service", "--body", "--json"]).1["slice_id"],
         "auth-service"
@@ -317,6 +323,11 @@ fn read_only_human_outputs_are_native_snapshots() {
     assert_eq!(show.0, 0);
     assert!(stdout_text(&show).contains("slice_id: auth-service"));
     assert!(stdout_text(&show).contains("docs:"));
+    // Overview block: exact rendering (label, two-space indent, trailing blank line)
+    // so placement/indentation/blank-line regressions are caught.
+    assert!(stdout_text(&show).contains(
+        "overview:\n  Handles JWT verification, the `require_auth` decorator, and in-memory session\n  lifecycle. Entry points are `verify_token` and `require_auth` in middleware,\n  plus `create_session`/`get_session`/`destroy_session` in sessions.\n\n"
+    ));
 
     let body = run_rust_raw(&["show", "auth-service", "--body"]);
     assert_eq!(body.0, 0);
@@ -1446,4 +1457,32 @@ fn browse_cancel_maps_to_exit_130() {
     let result = run_browse_with_stub(stub.path(), &["browse", "--print"]);
     assert_eq!(result.0, 130);
     assert!(stdout_text(&result).is_empty());
+}
+
+#[test]
+fn show_omits_overview_when_slice_has_no_lede() {
+    // A slice whose body is only `## ` sections (no prose intro) → no overview.
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("slices")).unwrap();
+    std::fs::write(
+        repo.join("slices/no-lede.md"),
+        "---\nslice_id: no-lede\ndescription: A slice with no prose intro\nloc: 5\nfiles:\n  - src/x.rs\n---\n\n## Runtime Flows\n\na -> b\n",
+    )
+    .unwrap();
+    run_git(repo, &["init"]);
+
+    let human = run_rust_raw_for_repo(repo, &["show", "no-lede"]);
+    assert_eq!(human.0, 0);
+    assert!(
+        !stdout_text(&human).contains("overview:"),
+        "no overview block for a no-lede slice"
+    );
+
+    let (status, value) = run_rust_for_repo(repo, &["show", "no-lede", "--json"]);
+    assert_eq!(status, 0);
+    assert_eq!(
+        value["overview"], "",
+        "overview json field is empty when there is no lede"
+    );
 }

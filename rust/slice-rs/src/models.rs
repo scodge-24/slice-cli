@@ -73,6 +73,7 @@ pub struct ShowSlice<'a> {
     pub exclusions: &'a [String],
     pub files: &'a [String],
     pub loc: Option<u64>,
+    pub overview: String,
     pub slice_id: &'a str,
 }
 

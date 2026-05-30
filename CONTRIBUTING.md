@@ -27,7 +27,7 @@ You need a Rust toolchain (pinned in `rust/slice-rs/rust-toolchain.toml`) and
   `agents/codebase-slicer.md` (guarded by `embedded_templates_match_committed_files`).
 - **Staleness is fingerprint-anchored.** `slice stamp` records a content hash of
   a doc's tracked files; `verified_at` is a human note. See
-  `design/manifest-schema.md`.
+  `docs/manifest-schema.md`.
 - **`examples/mock-repo/` is sample data**, not docs about the tool.
 
 ## Before opening a PR

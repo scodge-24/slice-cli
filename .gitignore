@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 
 trash/
+# local-only planning notes, not published
+design/
 .turbo/
 .gstack/
 target/

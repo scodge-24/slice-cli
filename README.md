@@ -32,9 +32,9 @@ From a checkout you can also run it without installing:
 cargo run --manifest-path rust/slice-rs/Cargo.toml -- --repo examples/mock-repo list --json
 ```
 
-> slice-cli began as a Python tool and was ported to Rust; the migration history
-> lives in [`design/`](design/). The Python implementation is preserved at tag
-> `python-impl-final` and branch `package-refactor`.
+> slice-cli began as a Python tool and was ported to Rust. The Python
+> implementation is preserved at tag `python-impl-final` and branch
+> `package-refactor`.
 
 ## 60-second tour
 
@@ -99,7 +99,7 @@ slice init --ci       # + a GitHub Actions staleness check
 
 `slice init` is idempotent and re-runnable. You write slice files under `slices/`
 and a `DOCS.yaml` manifest mapping docs to slices; see
-[`design/`](design/) for architecture, the manifest schema, and the migration guide.
+[`docs/`](docs/) for architecture, the manifest schema, and agent workflows.
 
 ## Generating slices with an agent
 
@@ -128,13 +128,13 @@ install into the current repo's `.claude/` only. Either way, then run
 environment (the agent uses LSP to map call graphs). Generated slices carry
 call-stack mapping (`## Runtime Flows`) and V-model verification links
 (`## Verification`, validated by `slice check`) by default — see
-[`design/verification-links.md`](design/verification-links.md).
+[`docs/verification-links.md`](docs/verification-links.md).
 
 ## Docs
 
-- [`design/architecture.md`](design/architecture.md) — how it works
-- [`design/manifest-schema.md`](design/manifest-schema.md) — `DOCS.yaml` reference
-- [`design/agent-workflows.md`](design/agent-workflows.md) — agent usage patterns
+- [`docs/architecture.md`](docs/architecture.md) — how it works
+- [`docs/manifest-schema.md`](docs/manifest-schema.md) — `DOCS.yaml` reference
+- [`docs/agent-workflows.md`](docs/agent-workflows.md) — agent usage patterns
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup and conventions
 
 ## License

@@ -23,7 +23,7 @@ First public release.
   `abstraction <- test::name` traceability links plus an `upstream:` design-doc
   link. `slice check` validates them (dangling test/upstream refs are errors),
   and `slice check --require-verification` warns on abstractions with no link
-  (opt-in coverage gap). Format: `design/verification-links.md`.
+  (opt-in coverage gap). Format: `docs/verification-links.md`.
 - `slice affected-docs`, `slice stale-docs`, `slice stamp`, `slice check`,
   `slice sync-index`, `slice docs`, `slice docs-bootstrap`.
 - `slice init` — wire slice-cli into a repo (idempotent agent-instruction block

@@ -123,7 +123,7 @@ The three sections above (`Runtime Flows`, `Verification`, `Update Triggers`) ar
 **mandatory** — they carry the call-stack map and the verification links the CLI surfaces
 via `slice show --call-stacks` / `--verification`. Optionally add `## System Behavior` and
 `## Invariants` when you can ground them in what the code actually does; skip them rather
-than guessing. The verification-link format is specified in `design/verification-links.md`;
+than guessing. The verification-link format is specified in `docs/verification-links.md`;
 `slice check` validates the links, so every referenced path must exist.
 
 For dependencies, use slice IDs (provided in your prompt alongside the candidate list), not file paths. If a dependency target isn't in the candidate list, note the file path and prefix with `external:`.

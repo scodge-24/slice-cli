@@ -9,9 +9,10 @@ CLI tool for navigating codebase slice documents with doc-staleness tracking. Tu
   (`tests/cli.rs` + module `#[cfg(test)]` units) and build throwaway git repos in
   tmp dirs.
 - `examples/mock-repo/` — a self-contained demo repo the CLI runs against (`src/` mock code, `slices/` definitions + `DOCS.yaml`, `docs/` tracked docs). Run it with `slice --repo examples/mock-repo <cmd>`. This is sample data, NOT documentation about the tool.
-- `design/` — design docs (architecture, schema, workflows, plans) incl. the
-  Python→Rust migration history.
-- `docs/` — reserved for real tool documentation (user-facing docs about slice-cli itself)
+- `docs/` — user-facing tool documentation: architecture, manifest schema, agent
+  workflows, verification links.
+- `design/` — local-only planning notes (gitignored, not published): the
+  Python→Rust migration plans and scratch.
 
 slice-cli was originally written in Python and ported to Rust; the Python
 implementation is preserved at tag `python-impl-final` / branch `package-refactor`.

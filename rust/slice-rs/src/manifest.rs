@@ -9,7 +9,8 @@ use crate::{Error, Result};
 
 #[derive(Debug, Deserialize)]
 struct RawManifest {
-    vault_root: Option<String>,
+    #[serde(alias = "vault_root")]
+    docs_root: Option<String>,
     docs: Option<IndexMap<String, RawTrackedDoc>>,
 }
 
@@ -35,7 +36,7 @@ pub fn load_doc_manifest(ctx: &Context) -> Result<DocManifest> {
     let path = ctx.docs_manifest_path();
     if !path.exists() {
         return Ok(DocManifest {
-            vault_root_raw: None,
+            docs_root_raw: None,
             docs: Vec::new(),
         });
     }
@@ -62,16 +63,16 @@ pub fn load_doc_manifest(ctx: &Context) -> Result<DocManifest> {
         })
         .collect::<Vec<_>>();
     Ok(DocManifest {
-        vault_root_raw: raw.vault_root,
+        docs_root_raw: raw.docs_root,
         docs,
     })
 }
 
 pub fn save_doc_manifest(manifest: &DocManifest, ctx: &Context) -> Result<()> {
     let mut content = String::new();
-    if let Some(vault_root) = &manifest.vault_root_raw {
-        content.push_str("vault_root: ");
-        content.push_str(vault_root);
+    if let Some(docs_root) = &manifest.docs_root_raw {
+        content.push_str("docs_root: ");
+        content.push_str(docs_root);
         content.push('\n');
     }
     content.push_str("docs:\n");
@@ -118,7 +119,7 @@ fn write_string_list(content: &mut String, key: &str, values: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::load_doc_manifest;
+    use super::{load_doc_manifest, save_doc_manifest};
     use crate::context::Context;
 
     fn ctx(root: &std::path::Path) -> Context {
@@ -131,20 +132,20 @@ mod tests {
         std::fs::create_dir(temp.path().join("slices")).unwrap();
         let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
         assert!(manifest.docs.is_empty());
-        assert_eq!(manifest.vault_root_raw, None);
+        assert_eq!(manifest.docs_root_raw, None);
     }
 
     #[test]
-    fn load_preserves_fields_and_vault_root() {
+    fn load_preserves_fields_and_docs_root() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("slices")).unwrap();
         std::fs::write(
             temp.path().join("slices/DOCS.yaml"),
-            "vault_root: ../docs\ndocs:\n  guide:\n    path: guide.md\n    slices:\n    - auth\n    verified_at: abc123\n    fingerprint: fp\n    tags:\n    - t1\n    include:\n    - src/*.rs\n    exclude:\n    - src/generated.rs\n",
+            "docs_root: ../docs\ndocs:\n  guide:\n    path: guide.md\n    slices:\n    - auth\n    verified_at: abc123\n    fingerprint: fp\n    tags:\n    - t1\n    include:\n    - src/*.rs\n    exclude:\n    - src/generated.rs\n",
         )
         .unwrap();
         let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
-        assert_eq!(manifest.vault_root_raw.as_deref(), Some("../docs"));
+        assert_eq!(manifest.docs_root_raw.as_deref(), Some("../docs"));
         assert_eq!(manifest.docs[0].doc_id, "guide");
         assert_eq!(manifest.docs[0].path, "guide.md");
         assert_eq!(manifest.docs[0].slices, vec!["auth"]);
@@ -153,5 +154,42 @@ mod tests {
         assert_eq!(manifest.docs[0].tags, vec!["t1"]);
         assert_eq!(manifest.docs[0].include, vec!["src/*.rs"]);
         assert_eq!(manifest.docs[0].exclude, vec!["src/generated.rs"]);
+    }
+
+    #[test]
+    fn load_accepts_legacy_vault_root_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("slices")).unwrap();
+        std::fs::write(
+            temp.path().join("slices/DOCS.yaml"),
+            "vault_root: ../docs\ndocs:\n  guide:\n    path: guide.md\n    verified_at: abc123\n",
+        )
+        .unwrap();
+        let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
+        assert_eq!(manifest.docs_root_raw.as_deref(), Some("../docs"));
+    }
+
+    #[test]
+    fn round_trip_migrates_legacy_key_to_docs_root() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("slices")).unwrap();
+        let path = temp.path().join("slices/DOCS.yaml");
+        // Legacy file keyed on `vault_root:`.
+        std::fs::write(
+            &path,
+            "vault_root: ../docs\ndocs:\n  guide:\n    path: guide.md\n    slices:\n    - auth\n    verified_at: abc123\n",
+        )
+        .unwrap();
+        let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
+        save_doc_manifest(&manifest, &ctx(temp.path())).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("docs_root: ../docs"),
+            "writer must emit docs_root: got {written}"
+        );
+        assert!(
+            !written.contains("vault_root:"),
+            "writer must not re-emit the legacy key: got {written}"
+        );
     }
 }

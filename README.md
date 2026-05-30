@@ -1,13 +1,15 @@
 # slice-cli
 
-**Know which design docs went stale the moment you change code.**
+**Query your codebase by slice: what owns this file, what's the blast radius before
+you edit, where a concept lives, what the runtime flows are — and which docs went stale.**
 
-`slice` turns a folder of "slice" documents (`slices/*.md`) into a query surface
-for humans and AI agents, and tracks whether your design docs are still accurate
-relative to the code they describe. A *slice* is a named region of a codebase
-(its files, dependencies, and durable system notes). `DOCS.yaml` maps docs to
-slices and remembers a content fingerprint of the code each doc was last verified
-against — so staleness is exact, and survives commits and rebases.
+`slice` turns a folder of "slice" documents (`slices/*.md`) into a fast query surface
+for humans and AI agents. A *slice* is a named region of a codebase — its files,
+dependencies, call-stack flows, and durable system notes. Ask it what owns a file,
+what transitively depends on a slice before you change it, where an abstraction lives,
+and how requests flow at runtime. And because `DOCS.yaml` maps docs to slices with a
+content fingerprint of the code each was last verified against, it also tells you which
+design docs have gone stale — exactly, surviving commits and rebases.
 
 ## Install
 
@@ -40,35 +42,42 @@ cargo run --manifest-path rust/slice-rs/Cargo.toml -- --repo examples/mock-repo 
 ## 60-second tour
 
 This repo ships a self-contained demo under `examples/mock-repo/`. Point `slice`
-at it with `--repo`:
+at it with `--repo`.
+
+**Orient on a file before you touch it** — one command tells you the owning slice,
+its dependencies, and how requests flow through it:
+
+```bash
+$ slice --repo examples/mock-repo context src/auth/middleware.py
+slice: auth-service
+description: Authentication and session management
+doc: slices/auth-service.md
+files: src/auth/middleware.py, src/auth/sessions.py
+dependencies:
+Invariants:
+- A token is valid only if unexpired AND its session still exists.
+- Sessions live in memory; a process restart drops all sessions.
+Runtime Flows:
+request -> require_auth -> verify_token -> get_session -> handler
+...
+```
+
+**Check the blast radius before you change a slice** — every slice that
+(transitively) depends on it:
+
+```bash
+$ slice --repo examples/mock-repo deps auth-service --reverse --transitive
+api-handlers
+```
+
+**Then there's doc staleness.** Change a file and `slice` tells you exactly which
+doc to review, and you stamp it back in sync once it's updated:
 
 ```bash
 $ slice --repo examples/mock-repo affected-docs src/auth/middleware.py
 [STALE] auth-guide  (auth-guide.md)  [auth-service]
   - examples/mock-repo/src/auth/middleware.py
   - examples/mock-repo/src/auth/sessions.py
-```
-
-That's the core loop: you changed a file, and `slice` tells you exactly which doc
-to review. Orient before editing with one command:
-
-```bash
-$ slice --repo examples/mock-repo context src/auth/middleware.py
-slice: auth-service
-description: Authentication and session management
-files: src/auth/middleware.py, src/auth/sessions.py
-linked docs:
-  [STALE] auth-guide  (auth-guide.md)
-System Behavior:
-Every protected request passes through `require_auth`...
-Runtime Flows:
-request -> require_auth -> verify_token -> get_session -> handler
-...
-```
-
-When a doc is back in sync, mark it verified:
-
-```bash
 $ slice --repo examples/mock-repo stamp auth-guide
 stamped auth-guide -> 5fb503f...
 ```
@@ -114,8 +123,19 @@ slice init --hook     # + a pre-commit staleness reminder
 slice init --ci       # + a GitHub Actions staleness check
 ```
 
-`slice init` is idempotent and re-runnable. You write slice files under `slices/`
-and a `DOCS.yaml` manifest mapping docs to slices; see
+`slice init` is idempotent and re-runnable. Generate slice files under `slices/` with
+`/slice-codebase` (or write them by hand).
+
+To also track design-doc staleness, set up `DOCS.yaml` (optional):
+
+```bash
+slice init --docs docs   # generate slices/DOCS.yaml from your docs directory
+slice stamp --all        # record baseline fingerprints once mappings look right
+```
+
+`slice init --docs` bootstraps real doc→slice mappings from docs whose frontmatter
+carries `tracks: [<code paths a doc describes>]`, and writes a commented stub seeded
+with the docs it found otherwise (add `tracks:` and re-run). See
 [`docs/`](docs/) for architecture, the manifest schema, and agent workflows.
 
 ## Generating slices with an agent
@@ -149,9 +169,11 @@ call-stack mapping (`## Runtime Flows`) and V-model verification links
 
 ## Docs
 
+- [`docs/navigating.md`](docs/navigating.md) — navigate a codebase with `slice` (human guide)
 - [`docs/architecture.md`](docs/architecture.md) — how it works
 - [`docs/manifest-schema.md`](docs/manifest-schema.md) — `DOCS.yaml` reference
 - [`docs/agent-workflows.md`](docs/agent-workflows.md) — agent usage patterns
+- [`docs/verification-links.md`](docs/verification-links.md) — canonical card syntax contract
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup and conventions
 
 ## License

@@ -9,17 +9,27 @@ const BLOCK_END: &str = "<!-- slice-cli:end -->";
 const AGENT_INSTRUCTIONS: &str = "\
 ## slice-cli
 
-This repo tracks whether design docs are stale relative to the code they
-describe, via `slice` (slice-cli) and `slices/DOCS.yaml`.
+`slice` (slice-cli) turns this repo's `slices/*.md` cards into a fast query surface for
+navigating code - ownership, blast radius, call stacks, concepts - plus tracking whether
+design docs have gone stale. Reach for it before editing unfamiliar code.
 
-- Before editing an unfamiliar file, run `slice context <path>` to see the
-  owning slice, its system context, and any stale linked docs.
-- After changing source, run `slice affected-docs <changed-files>` to see which
-  docs may need updating. Update stale docs, then `slice stamp <doc-id>` to mark
-  them verified.
-- `slice stale-docs` lists everything currently stale (exit 1 if any are stale).
-- If `slices/` is missing or out of date, run `/slice-codebase` to (re)generate
-  slice definitions.
+Navigate:
+
+- `slice context <path>` - orient on a file: its owning slice, dependencies, runtime
+  flows, and system notes (add `--json` for linked docs with stale status).
+- `slice for <path>` - which slice owns a path.
+- `slice show <id> --call-stacks` / `--system` - runtime call chains / full system notes.
+- `slice deps <id> --reverse --transitive` - blast radius: every slice that
+  (transitively) depends on this one, before you change it.
+- `slice find <needle>` - locate a concept or abstraction across slices.
+
+Track doc staleness:
+
+- After changing source, run `slice affected-docs <changed-files>` to see which docs may
+  be stale. Update them, then `slice stamp <doc-id>` to mark verified. `slice stale-docs`
+  lists everything stale (exit 1 if any).
+
+If `slices/` is missing or out of date, run `/slice-codebase` to (re)generate it.
 ";
 
 const HOOK_SCRIPT: &str = "\
@@ -57,16 +67,17 @@ const SLICE_CODEBASE_SKILL: &str = include_str!("../../../skills/slice-codebase/
 const CODEBASE_SLICER_AGENT: &str = include_str!("../../../agents/codebase-slicer.md");
 
 #[expect(clippy::struct_excessive_bools, reason = "mirrors CLI init flags")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InitOptions {
     pub hook: bool,
     pub ci: bool,
     pub agent: bool,
     pub global: bool,
     pub dry_run: bool,
+    pub docs: Option<PathBuf>,
 }
 
-pub fn run(ctx: &Context, options: InitOptions) -> Result<i32> {
+pub fn run(ctx: &Context, options: &InitOptions) -> Result<i32> {
     let mut planned = Vec::new();
     let block = render_agent_block();
     let mut agent_files = vec![ctx.repo_root().join("CLAUDE.md")];
@@ -116,6 +127,9 @@ pub fn run(ctx: &Context, options: InitOptions) -> Result<i32> {
         for (path, _) in planned {
             println!("would write: {}", ctx.rel(&path));
         }
+        if let Some(docs_dir) = options.docs.as_deref() {
+            crate::commands::setup_docs_manifest(ctx, docs_dir, true)?;
+        }
         return Ok(0);
     }
 
@@ -125,6 +139,9 @@ pub fn run(ctx: &Context, options: InitOptions) -> Result<i32> {
             make_executable(&path)?;
         }
         println!("wrote {}", ctx.rel(&path));
+    }
+    if let Some(docs_dir) = options.docs.as_deref() {
+        crate::commands::setup_docs_manifest(ctx, docs_dir, false)?;
     }
     Ok(0)
 }

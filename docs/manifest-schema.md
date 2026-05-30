@@ -2,29 +2,30 @@
 
 ## Purpose
 
-`slices/DOCS.yaml` is the bridge between the Obsidian vault (documentation) and the slice CLI (code ownership). It maps each tracked doc to the code slices it describes and records when it was last verified as current.
+`slices/DOCS.yaml` is the bridge between documentation (any format — plain Markdown, a docs site, a wiki) and the slice CLI (code ownership). It maps each tracked doc to the code slices it describes and records when it was last verified as current. slice-cli is documentation-system-agnostic; it only needs a directory of Markdown files.
 
 ## Location
 
-Always at `slices/DOCS.yaml`, alongside `INDEX.md` and slice definition files. This ensures the manifest is available in CI and headless environments without requiring vault access.
+Always at `slices/DOCS.yaml`, alongside `INDEX.md` and slice definition files. This ensures the manifest is available in CI and headless environments without requiring access to the docs themselves.
 
 ## Schema
 
 ```yaml
 # slices/DOCS.yaml
 
-vault_root: ../wiki              # path to vault, relative to slices/
+docs_root: ../docs               # path to the docs directory, relative to slices/
+                                 # (the legacy key `vault_root:` is still accepted)
 
 docs:
   boundary-contract-spec:        # doc_id (stable key, matches frontmatter)
-    path: architecture/boundary-contract-spec.md   # relative to vault_root
+    path: architecture/boundary-contract-spec.md   # relative to docs_root
     slices:                      # slice IDs this doc tracks
       - rust-abc-types
       - rust-abc-funcs-derivative
       - rust-abc-props
     fingerprint: 9f86d081...    # sha256 of tracked files at stamp time (staleness anchor)
     verified_at: abc123def456    # HEAD short-SHA at stamp time (human note)
-    tags:                        # optional, human-semantic (mirrors vault frontmatter)
+    tags:                        # optional, human-semantic (mirrors doc frontmatter)
       - boundary
       - contracts
     include:                     # optional, narrows to specific files within slices
@@ -40,14 +41,14 @@ docs:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `vault_root` | string | Yes | Path to vault directory, relative to the directory containing DOCS.yaml |
+| `docs_root` | string | Yes | Path to the documentation directory, relative to the directory containing DOCS.yaml. The legacy key `vault_root` is still accepted on read (serde alias). |
 | `docs` | map | Yes | Map of `doc_id` → doc entry |
 
 ### Per-doc entry
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `path` | string | Yes | Doc file path, relative to `vault_root` |
+| `path` | string | Yes | Doc file path, relative to `docs_root` |
 | `slices` | list[string] | Yes | Slice IDs this doc tracks. Must match existing `slice_id` values. |
 | `fingerprint` | string | No | SHA-256 content hash of the doc's resolved tracked files at stamp time. The staleness anchor. Written by `slice stamp`. Absent on entries stamped before this field existed. |
 | `verified_at` | string | No | HEAD short-SHA at stamp time. Human-readable note only — not used for staleness when `fingerprint` is present. Empty/`null` means "never verified". |
@@ -78,7 +79,7 @@ Re-stamping a legacy entry migrates it to a fingerprint.
 
 ## Doc Frontmatter Schema
 
-Docs in the vault use content-oriented frontmatter. Slice IDs do not appear here.
+Tracked docs use content-oriented frontmatter. Slice IDs do not appear here.
 
 ```yaml
 ---
@@ -87,7 +88,7 @@ title: Boundary Contract Specification
 kind: design                        # design | guide | reference | adr | runbook
 status: active                      # active | draft | archived | superseded
 tags: [boundary, contracts, ownership]
-aliases: [BCS, boundary spec]       # Obsidian search aliases
+aliases: [BCS, boundary spec]       # optional alternate names
 summary: >-
   Ownership rules, naming invariants, and adapter patterns
   for the Rust simulation pipeline.
@@ -102,8 +103,8 @@ summary: >-
 | `title` | Yes | Human-readable title. |
 | `kind` | No | Document type. Useful for filtering. |
 | `status` | No | Lifecycle state. `archived` docs may be excluded from staleness checks. |
-| `tags` | No | Human-semantic tags. Obsidian uses these for search and graph coloring. |
-| `aliases` | No | Obsidian search aliases. |
+| `tags` | No | Human-semantic tags. Searchable via `slice find`. |
+| `aliases` | No | Optional alternate names for the doc. |
 | `summary` | No | One-sentence description for agent context. Low token cost, high signal. |
 
 ## Validation Rules (slice check)
@@ -112,12 +113,12 @@ The `slice check` command validates the manifest:
 
 | Check | Severity | Description |
 |---|---|---|
-| Doc file exists | Error | `vault_root` + `path` must resolve to a real file |
+| Doc file exists | Error | `docs_root` + `path` must resolve to a real file |
 | Slice IDs exist | Error | Every entry in `slices` must match a known `slice_id` |
 | doc_id matches frontmatter | Error | The manifest key must match `doc_id` in the doc's YAML frontmatter |
 | verified_at is valid SHA | Warning | If set, should resolve via `git rev-parse` |
 | No duplicate doc_ids | Error | Each doc_id appears at most once |
-| No orphan docs | Warning | Vault docs with `doc_id` frontmatter that aren't in the manifest |
+| No orphan docs | Warning | Docs with `doc_id` frontmatter that aren't in the manifest |
 
 ## Examples
 

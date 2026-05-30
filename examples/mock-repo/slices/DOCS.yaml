@@ -1,4 +1,4 @@
-vault_root: ../docs
+docs_root: ../docs
 docs:
   auth-guide:
     path: auth-guide.md

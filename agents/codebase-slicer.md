@@ -123,8 +123,26 @@ The three sections above (`Runtime Flows`, `Verification`, `Update Triggers`) ar
 **mandatory** — they carry the call-stack map and the verification links the CLI surfaces
 via `slice show --call-stacks` / `--verification`. Optionally add `## System Behavior` and
 `## Invariants` when you can ground them in what the code actually does; skip them rather
-than guessing. The verification-link format is specified in `docs/verification-links.md`;
-`slice check` validates the links, so every referenced path must exist.
+than guessing. `slice check` validates the verification links, so every referenced path
+must exist. The link grammar is specified in full below.
+
+A good card is not just for `slice check` — it powers every later query: blast-radius
+(`slice deps --reverse --transitive`), call stacks (`slice show --call-stacks`), and
+concept search (`slice find`). Thin or malformed sections degrade all of them.
+
+**Canonical syntax + pre-write self-check.** Follow this grammar exactly — don't
+improvise. Before writing each slice file, verify:
+
+- Headings are `## ` + a single space (not `##Heading`, not `### `), using the exact
+  section names above — a malformed heading silently swallows the section.
+- `## Runtime Flows` uses ASCII ` -> ` arrows (not `→`), one call chain per line, no bullets.
+- `## Verification` lines read `` - `abstraction` <- path/to/test::name `` — a leading
+  `- `, backticked abstraction, a literal ` <- `, comma-separated refs.
+- Every abstraction in `abstractions:` appears in `## Verification` (or is dropped if
+  genuinely untested) — `slice check --require-verification` is a hard gate and will fail
+  the build otherwise.
+- Every referenced path exists; `dependencies` are slice IDs, not file paths; no
+  empty/placeholder sections; `files` globs resolve.
 
 For dependencies, use slice IDs (provided in your prompt alongside the candidate list), not file paths. If a dependency target isn't in the candidate list, note the file path and prefix with `external:`.
 

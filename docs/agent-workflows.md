@@ -4,10 +4,12 @@
 
 AI agents interact with docs through two channels:
 
-- **Slice CLI** for code-aware queries: "what docs are affected?", "what's stale?", "mark as reviewed"
-- **Direct file access** for content: reading, editing, creating docs in the vault
+- **Slice CLI** for code-aware queries: "what owns this file?", "what's the blast radius?",
+  "what docs are affected?", "what's stale?", "mark as reviewed"
+- **Direct file access** for content: reading, editing, creating docs (plain Markdown)
 
-Obsidian CLI/API is never required. All agent workflows work headlessly.
+No particular documentation tool is required — docs are plain `.md` files. All agent
+workflows work headlessly.
 
 ## Core Workflows
 
@@ -55,7 +57,7 @@ Response:
 [
   {
     "doc_id": "auth-guide",
-    "path": "wiki/guides/auth-guide.md",
+    "path": "docs/auth-guide.md",
     "matching_slices": ["auth-service"],
     "status": "stale",
     "changed_files": ["src/auth/middleware.py"]
@@ -89,7 +91,7 @@ slice docs rust-abc-types --json
 [
   {
     "doc_id": "boundary-contract-spec",
-    "path": "wiki/architecture/boundary-contract-spec.md",
+    "path": "docs/boundary-contract-spec.md",
     "verified_at": "abc123",
     "tags": ["boundary", "contracts"],
     "stale": false
@@ -111,7 +113,7 @@ slice stale-docs --json
 [
   {
     "doc_id": "auth-guide",
-    "path": "wiki/guides/auth-guide.md",
+    "path": "docs/auth-guide.md",
     "verified_at": "b6cf05a",
     "affected_slices": ["auth-service"],
     "changed_files": ["src/auth/middleware.py"]
@@ -144,15 +146,10 @@ Headless content search:
 
 ```bash
 # Search doc content with ripgrep
-rg "boundary contract" wiki/
+rg "boundary contract" docs/
 
 # Search via slice CLI (searches manifest tags + slice metadata)
 slice find boundary
-```
-
-With Obsidian running (optional):
-```bash
-obsidian search query="boundary contract" --json
 ```
 
 ### 6. "Add a new doc to tracking"
@@ -160,14 +157,16 @@ obsidian search query="boundary contract" --json
 Agent creates a doc and registers it:
 
 ```bash
-# Create the doc in the vault
-cat > wiki/guides/new-feature.md << 'EOF'
+# Create the doc under your docs directory, with `tracks:` naming the code it describes
+cat > docs/new-feature.md << 'EOF'
 ---
 doc_id: new-feature-guide
 title: New Feature Guide
 kind: guide
 status: draft
 tags: [feature, guide]
+tracks:
+  - src/features/new_feature.rs
 summary: How to use the new feature.
 ---
 
@@ -176,9 +175,15 @@ summary: How to use the new feature.
 Content here.
 EOF
 
-# Register in manifest (future: slice doc-add command)
-# For now, agents edit DOCS.yaml directly or use a helper
+# Regenerate DOCS.yaml from the docs dir (resolves `tracks:` paths to owning slices),
+# then record a baseline fingerprint:
+slice docs-bootstrap docs --force
+slice stamp new-feature-guide
 ```
+
+First-time setup (no DOCS.yaml yet): `slice init --docs docs` bootstraps the manifest
+from docs that carry `tracks:` frontmatter, or writes a commented stub seeded with the
+docs it found so you can fill in the mappings.
 
 ## Command Reference
 
@@ -218,14 +223,18 @@ EOF
 
 ## Headless vs Interactive
 
-| Capability | Headless (agent-only) | Interactive (Obsidian available) |
+Everything below works headlessly with the slice CLI and plain file access. If you also use
+a docs viewer or wiki (a static site, Obsidian, etc.), it adds human ergonomics on top — but
+nothing here requires one.
+
+| Capability | Headless (agent-only) | With a docs tool (optional) |
 |---|---|---|
 | Staleness queries | `slice stale-docs` | same |
-| Read doc content | `Read` tool / `cat` | Obsidian app or `obsidian read` |
-| Edit doc content | `Edit` tool / direct write | Obsidian app |
-| Content search | `rg` / `slice find` | `obsidian search` (JSON) |
-| Doc relationships | Read `[[wikilinks]]` from file | Obsidian graph view |
-| Tag browsing | `slice find <tag>` | Obsidian tag pane |
+| Read doc content | `Read` tool / `cat` | your viewer |
+| Edit doc content | `Edit` tool / direct write | your editor |
+| Content search | `rg` / `slice find` | your tool's search |
+| Doc relationships | Markdown links in the file | your tool's graph/backlinks |
+| Tag browsing | `slice find <tag>` | your tool's tag UI |
 | Stamp | `slice stamp` | same |
 
 ## Integration Points
@@ -266,4 +275,4 @@ committed if no content changes are needed.
 | Doc file missing | `slice check` reports error; drift check skips the doc |
 | Invalid verified_at SHA | Treated as stale with git error message |
 | Unknown slice ID in manifest | `slice check` reports error |
-| Vault directory missing | `slice check` reports error for each unresolvable path |
+| Docs directory missing | `slice check` reports error for each unresolvable path |

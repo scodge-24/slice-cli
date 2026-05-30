@@ -9,6 +9,13 @@ effort: medium
 
 Ensure the repo has current slice definitions, using the `codebase-slicer` subagent for scanning and the `slice` CLI for validation.
 
+Slice cards are a **navigation and context surface** first: once generated, agents and
+humans query them with `slice context <file>` (orient on a file), `slice deps <id>
+--reverse --transitive` (blast radius before editing), `slice show <id> --call-stacks`
+(runtime flows), and `slice find <needle>` (locate a concept). Doc-staleness tracking is
+one capability among these. This skill exists to make those queries rich and accurate, so
+generation quality matters: a thin or malformed card is a thin answer to every later query.
+
 **Running the slice CLI.** Steps below call `slice <cmd>`. Use `slice` if it is on PATH (the prebuilt binary or `cargo install --path rust/slice-rs`). If it is not, fall back to building from the checkout: `cargo run --manifest-path "$CLAUDE_PLUGIN_ROOT/rust/slice-rs/Cargo.toml" -- <cmd>` (when running as the slice-cli plugin) or `cargo run --manifest-path /path/to/slice-cli/rust/slice-rs/Cargo.toml -- <cmd>` (needs a Rust toolchain).
 
 **Subagent type.** The scan agent is referenced below as `slice-cli:codebase-slicer` (its name when installed via the slice-cli plugin). If slicing was bootstrapped with `slice init --agent` instead, the agent is installed loose as plain `codebase-slicer` — use that name.
@@ -17,10 +24,17 @@ If `$ARGUMENTS` contains file or directory paths (e.g., `/slice-codebase src/aut
 
 ## Check First
 
-- Look for `slices/INDEX.md` at the repo root.
-- **Up to date**: read the commit hash from INDEX.md, compare against `git rev-parse HEAD`. If they match, report "slices up to date" and stop.
-- **Stale** (INDEX.md exists but hash is old): run [Diff Slice Update](#diff-slice-update).
-- **Missing** (no INDEX.md): run [Full Slice Generation](#full-slice-generation). This covers the edge case where `slices/*.md` files exist but the index was deleted — do not attempt a diff update with no base hash.
+- **Missing** (no `slices/` directory, or no `slices/*.md`): run [Full Slice Generation](#full-slice-generation).
+- Otherwise run `slice sync-index --check`. It compares the recorded source fingerprint in
+  `slices/INDEX.md` against the current code (content-based, so it survives commits and
+  rebases):
+  - **exit 0** — slices are in sync with the code. Report "slices up to date" and stop.
+  - **exit 1, INDEX.md present** — code drifted: run [Diff Slice Update](#diff-slice-update).
+  - **exit 1, no INDEX.md** (slice files exist but the index was deleted): run
+    [Full Slice Generation](#full-slice-generation) — do not attempt a diff update with no base.
+
+Do not compare git commit hashes by hand; staleness is fingerprint-based and
+`slice sync-index --check` is the source of truth.
 
 ---
 
@@ -60,7 +74,7 @@ Agent call (one per candidate, all launched in parallel):
     - files: <file list>
     - entry_points: <entry points>
     - all candidate IDs: <full list from scout>
-    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly, including the mandatory body sections: ## Runtime Flows (call-stack chains from outgoingCalls), ## Verification (V-model links — for each abstraction, incomingCalls filtered to test files, written as `abstraction <- testpath::testname`, plus an optional `upstream:` design-doc link), and ## Update Triggers. The verification-link format and test-file heuristic are in the codebase-slicer agent definition and docs/verification-links.md."
+    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly, including the mandatory body sections: ## Runtime Flows (call-stack chains from outgoingCalls), ## Verification (V-model links — for each abstraction, incomingCalls filtered to test files, written as `abstraction <- testpath::testname`, plus an optional `upstream:` design-doc link), and ## Update Triggers. The verification-link format and test-file heuristic are in the codebase-slicer agent definition."
 ```
 
 Wait for ALL refine agents to complete before Phase 3.
@@ -69,13 +83,25 @@ Wait for ALL refine agents to complete before Phase 3.
 
 1. **Validate** — run:
    ```
-   slice check
+   slice check --require-verification
    ```
+   `--require-verification` makes a card with an unverified abstraction a hard error
+   (non-zero exit), so this is a real quality gate, not advisory output.
    - **Pass**: proceed.
    - **Fail**: read the error output, fix the offending slice files, re-run until it passes.
-     Common fixes: resolve overlapping file assignments (assign to the slice with stronger coupling), fix dangling dependency references, correct file paths.
+     Common fixes: resolve overlapping file assignments (assign to the slice with stronger
+     coupling), fix dangling dependency references, correct file paths, and add the missing
+     `` - `abstraction` <- test `` line each "abstraction not verified" error names (or drop
+     the abstraction if it is genuinely untested).
 
-2. **Generate `slices/INDEX.md`** — run:
+2. **Self-review each card against the canonical syntax** before finishing (the full
+   grammar is in the `codebase-slicer` agent definition installed alongside this skill):
+   - sections use `## ` + a single space, with the exact names the CLI surfaces;
+   - `## Runtime Flows` uses ASCII ` -> `, one flow per line;
+   - `## Verification` links read `` - `abstraction` <- path::sym `` with a literal ` <- `;
+   - every abstraction appears in `## Verification`; no empty/placeholder sections.
+
+3. **Generate `slices/INDEX.md`** — run:
    ```
    slice sync-index
    ```
@@ -84,11 +110,12 @@ Wait for ALL refine agents to complete before Phase 3.
 
 ---
 
-<important if="slices/INDEX.md exists but its commit hash is behind HEAD">
+<important if="slice sync-index --check reports drift (exit 1) and slices/INDEX.md exists">
 
 ## Diff Slice Update
 
-1. Get changed files: `git diff <index-hash> HEAD --name-only`
+1. Get changed files: `git diff <last-updated-sha> HEAD --name-only`, where
+   `<last-updated-sha>` is the `Last updated:` SHA recorded at the top of `slices/INDEX.md`.
 2. Spawn one `slice-cli:codebase-slicer` agent in scout mode, passing only the changed files:
 
 ```
@@ -110,6 +137,24 @@ Filter the changed file list to files within the hinted paths before passing to 
 The refine phase is skipped for diff updates — directory-level changes only.
 
 </important>
+
+---
+
+## Set up doc tracking (optional)
+
+Slices power navigation on their own. If the repo also has design docs you want kept in
+sync with the code, set up `slices/DOCS.yaml` once:
+
+1. Run `slice init --docs <docs-dir>` (e.g. `slice init --docs docs`). When docs carry
+   `tracks: [<code paths a doc describes>]` frontmatter, it writes real doc→slice
+   mappings; otherwise it writes a commented stub seeded with the docs it found.
+2. Add `tracks:` to each design doc's frontmatter (the code paths it documents), then
+   re-run `slice init --docs <docs-dir>` (or `slice docs-bootstrap <docs-dir>`).
+3. `slice stamp --all` to record baseline fingerprints.
+
+Skip this entirely if the repo only needs navigation — doc-staleness tracking is
+orthogonal to slice generation. Never invent `tracks:` mappings you can't ground in the
+code a doc actually describes.
 
 ---
 

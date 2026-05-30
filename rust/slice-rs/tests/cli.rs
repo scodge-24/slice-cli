@@ -1099,6 +1099,57 @@ fn init_docs_leaves_existing_manifest_untouched() {
 }
 
 #[test]
+fn init_docs_missing_dir_fails_loudly() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    // A typo'd / moved docs dir must exit non-zero, not silently succeed with no manifest.
+    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "nope-not-here"]);
+    assert_eq!(
+        result.0,
+        2,
+        "missing docs dir must fail: {}",
+        stderr_text(&result)
+    );
+    assert!(stderr_text(&result).contains("not found"));
+    assert!(
+        !repo.join("slices/DOCS.yaml").exists(),
+        "no manifest should be written when the docs dir is missing"
+    );
+}
+
+#[test]
+fn deps_reverse_transitive_excludes_self_on_cycle() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    for name in ["cyc_a", "cyc_b"] {
+        std::fs::write(repo.join(format!("src/{name}.rs")), "// x\n").unwrap();
+    }
+    // cyc-a <-> cyc-b mutual dependency.
+    std::fs::write(
+        repo.join("slices/cyc-a.md"),
+        "---\nslice_id: cyc-a\ndescription: A\nfiles:\n  - src/cyc_a.rs\ndependencies:\n  - cyc-b\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/cyc-b.md"),
+        "---\nslice_id: cyc-b\ndescription: B\nfiles:\n  - src/cyc_b.rs\ndependencies:\n  - cyc-a\n---\n",
+    )
+    .unwrap();
+    let trans = run_rust_for_repo(
+        repo,
+        &["deps", "cyc-a", "--reverse", "--transitive", "--json"],
+    );
+    assert_eq!(trans.0, 0);
+    let deps = trans.1["dependencies"].as_array().unwrap();
+    assert!(deps.iter().any(|value| value == "cyc-b"));
+    assert!(
+        !deps.iter().any(|value| value == "cyc-a"),
+        "blast radius must not include the start slice itself: {deps:?}"
+    );
+}
+
+#[test]
 fn p2_command_edges_are_covered() {
     let temp = fixture_repo();
     let repo = temp.path();

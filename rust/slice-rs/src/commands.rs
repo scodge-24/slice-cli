@@ -993,14 +993,17 @@ pub fn docs_bootstrap(ctx: &Context, docs_dir: &Path, dry_run: bool, force: bool
 /// Set up `slices/DOCS.yaml` as part of `slice init --docs <dir>`. Bootstraps real
 /// doc→slice mappings when any doc carries `tracks:` frontmatter; otherwise writes a
 /// commented stub seeded with the docs it found. Never clobbers an existing manifest.
-pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool) -> Result<()> {
+/// Returns the exit code: 0 on success (manifest written, or one already exists),
+/// 2 when the docs directory is missing — so a typo'd `--docs` path fails loudly
+/// instead of silently leaving no manifest behind.
+pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool) -> Result<i32> {
     let manifest_path = ctx.docs_manifest_path();
     if manifest_path.exists() {
         println!(
             "{} already exists - leaving it (use `slice docs-bootstrap --force` to regenerate)",
             ctx.rel(&manifest_path)
         );
-        return Ok(());
+        return Ok(0);
     }
     // Resolve a relative --docs path against the repo root, not the process CWD.
     let docs_dir = if docs_dir.is_absolute() {
@@ -1010,11 +1013,11 @@ pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool)
     };
     if !docs_dir.exists() {
         eprintln!("documentation directory not found: {}", ctx.rel(&docs_dir));
-        return Ok(());
+        return Ok(2);
     }
     if dry_run {
         println!("would set up doc tracking at {}", ctx.rel(&manifest_path));
-        return Ok(());
+        return Ok(0);
     }
     let scan = scan_docs_dir(ctx, &docs_dir)?;
     if scan.any_tracks && !scan.entries.is_empty() {
@@ -1036,7 +1039,7 @@ pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool)
             ctx.rel(&docs_dir)
         );
     }
-    Ok(())
+    Ok(0)
 }
 
 /// Write a commented DOCS.yaml stub, seeded with any docs found, when nothing carries
@@ -1518,6 +1521,9 @@ fn transitive_reverse_deps(start: &str, docs: &[SliceDoc]) -> Vec<String> {
     let reverse = reverse_deps(docs);
     let mut ordered = Vec::new();
     let mut seen = FxHashSet::default();
+    // Seed with `start` so a dependency cycle can't list the slice itself as part
+    // of its own blast radius.
+    seen.insert(start.to_owned());
     let mut queue = VecDeque::from(reverse.get(start).cloned().unwrap_or_default());
     while let Some(current) = queue.pop_front() {
         if !seen.insert(current.clone()) {

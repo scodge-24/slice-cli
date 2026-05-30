@@ -128,7 +128,7 @@ pub fn run(ctx: &Context, options: &InitOptions) -> Result<i32> {
             println!("would write: {}", ctx.rel(&path));
         }
         if let Some(docs_dir) = options.docs.as_deref() {
-            crate::commands::setup_docs_manifest(ctx, docs_dir, true)?;
+            return crate::commands::setup_docs_manifest(ctx, docs_dir, true);
         }
         return Ok(0);
     }
@@ -141,7 +141,7 @@ pub fn run(ctx: &Context, options: &InitOptions) -> Result<i32> {
         println!("wrote {}", ctx.rel(&path));
     }
     if let Some(docs_dir) = options.docs.as_deref() {
-        crate::commands::setup_docs_manifest(ctx, docs_dir, false)?;
+        return crate::commands::setup_docs_manifest(ctx, docs_dir, false);
     }
     Ok(0)
 }

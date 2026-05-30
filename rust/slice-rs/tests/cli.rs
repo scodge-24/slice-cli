@@ -1460,15 +1460,15 @@ fn browse_forwards_query_and_quotes_preview_paths() {
         "ctrl-r → call-stacks: {recorded}"
     );
     assert!(
-        bound("ctrl-v", "show {1} --verification"),
-        "ctrl-v → verification: {recorded}"
+        bound("ctrl-d", "show {1} --verification"),
+        "ctrl-d → verification: {recorded}"
     );
     assert!(
         bound("ctrl-t", "deps {1} --reverse"),
         "ctrl-t → reverse-deps: {recorded}"
     );
-    // The old binds are gone.
-    for stale in ["ctrl-f:", "ctrl-d:", "ctrl-s:"] {
+    // The old picker binds are gone (ctrl-d is now verification, not direct-deps).
+    for stale in ["ctrl-f:", "ctrl-s:"] {
         assert!(
             !recorded.lines().any(|l| l.starts_with(stale)),
             "stale bind {stale} present"

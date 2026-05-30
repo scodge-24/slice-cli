@@ -15,7 +15,7 @@ First public release.
   `--json`), so the slice's orientation prose is visible without `--body`.
 - `slice browse` — an interactive `fzf` picker (optional `fzf` >= 0.30 dependency)
   fed from structured slice data, with a live wrapped preview pane and lens keys:
-  `ctrl-o` overview, `ctrl-r` runtime call-stacks, `ctrl-v` verification, `ctrl-t`
+  `ctrl-o` overview, `ctrl-r` runtime call-stacks, `ctrl-d` verification, `ctrl-t`
   reverse deps. `enter` shows the slice; `--print` emits the selected id for piping
   (`id=$(slice browse --print) && slice show "$id"`).
 - **Terminal color** on human output (`list`/`show`/`find`/`stale-docs`), gated by a

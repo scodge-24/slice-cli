@@ -592,7 +592,7 @@ pub fn browse(
         ))
         .arg("--bind")
         .arg(format!(
-            "ctrl-v:{}",
+            "ctrl-d:{}",
             fzf_action("change-preview", &format!("{base} show {{1}} --verification"))
         ))
         .arg("--bind")
@@ -601,7 +601,7 @@ pub fn browse(
             fzf_action("change-preview", &format!("{base} deps {{1}} --reverse"))
         ))
         .arg("--header")
-        .arg("enter: show | ^o overview | ^r runtime | ^v verify | ^t used-by | ^/ pane | esc: cancel")
+        .arg("enter: show | ^o overview | ^r runtime | ^d verify | ^t used-by | ^/ pane | esc: cancel")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     if let Some(query) = query {

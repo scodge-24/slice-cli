@@ -97,7 +97,7 @@ terminal; control it with the global `--color=auto|always|never`. Pipes and
 
 `slice browse` opens an `fzf` picker with a live, wrapped preview pane. `enter` shows
 the selected slice; the preview switches between lenses with `ctrl-o` (overview),
-`ctrl-r` (runtime call-stacks), `ctrl-v` (verification links), and `ctrl-t` (reverse
+`ctrl-r` (runtime call-stacks), `ctrl-d` (verification links), and `ctrl-t` (reverse
 deps / blast radius). `--print` emits the chosen slice id instead, for scripting:
 
 ```bash

@@ -571,28 +571,37 @@ pub fn browse(
     let base = format!("{q_exe} --repo {q_repo} --color={preview_color}");
     let preview = format!("{base} show {{1}}");
 
+    // Lenses onto a slice's three content layers. The keys avoid fzf's default
+    // line-editing binds (ctrl-u=clear-query etc.); files/direct-deps are already in
+    // the overview, so they don't get their own keys.
     let mut command = Command::new("fzf");
     command
         .arg("--ansi")
+        .arg("--preview-window=right,wrap")
         .arg("--preview")
         .arg(&preview)
         .arg("--bind")
         .arg(format!(
-            "ctrl-f:{}",
-            fzf_action("change-preview", &format!("{base} files {{1}}"))
-        ))
-        .arg("--bind")
-        .arg(format!(
-            "ctrl-d:{}",
-            fzf_action("change-preview", &format!("{base} deps {{1}}"))
-        ))
-        .arg("--bind")
-        .arg(format!(
-            "ctrl-s:{}",
+            "ctrl-o:{}",
             fzf_action("change-preview", &format!("{base} show {{1}}"))
         ))
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-r:{}",
+            fzf_action("change-preview", &format!("{base} show {{1}} --call-stacks"))
+        ))
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-v:{}",
+            fzf_action("change-preview", &format!("{base} show {{1}} --verification"))
+        ))
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-t:{}",
+            fzf_action("change-preview", &format!("{base} deps {{1}} --reverse"))
+        ))
         .arg("--header")
-        .arg("enter: show | ctrl-f: files | ctrl-d: deps | ctrl-s: back | ctrl-/: preview | esc: cancel")
+        .arg("enter: show | ^o overview | ^r runtime | ^v verify | ^t used-by | ^/ pane | esc: cancel")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     if let Some(query) = query {

@@ -95,9 +95,10 @@ Human output (`list`/`show`/`find`/`stale-docs`) is colored when stdout is a
 terminal; control it with the global `--color=auto|always|never`. Pipes and
 `--json` are never colored, and `NO_COLOR` is honored.
 
-`slice browse` opens an `fzf` picker with a live preview pane. `enter` shows the
-selected slice; `ctrl-f` / `ctrl-d` / `ctrl-s` switch the preview to files / deps /
-back. `--print` emits the chosen slice id instead, for scripting:
+`slice browse` opens an `fzf` picker with a live, wrapped preview pane. `enter` shows
+the selected slice; the preview switches between lenses with `ctrl-o` (overview),
+`ctrl-r` (runtime call-stacks), `ctrl-v` (verification links), and `ctrl-t` (reverse
+deps / blast radius). `--print` emits the chosen slice id instead, for scripting:
 
 ```bash
 id=$(slice browse --print) && slice show "$id"   # && guards against cancel

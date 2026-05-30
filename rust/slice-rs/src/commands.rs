@@ -459,21 +459,36 @@ pub fn find(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<
     Ok(0)
 }
 
-/// Build the tab-delimited fzf rows (`slice_id\tdescription (LoC)`). The hidden
-/// `slice_id` is field 1; fzf shows fields 2+. Slices whose id contains a tab or
-/// newline are skipped (returned in the second tuple element) so the delimiter
-/// protocol can't be corrupted.
+/// Build the fzf rows: `slice_id  description (LoC)`, the id left-padded to a column.
+/// The id is shown (and kept first) so it's both visible and fuzzy-searchable — fzf
+/// matches the whole line, so typing a slice name filters by id. The id stays free of
+/// ANSI so the `{1}` placeholder resolves to a clean value. Slices whose id contains
+/// whitespace are skipped (returned in the second element) so the first-token contract
+/// can't be corrupted.
 fn build_browse_rows(docs: &[SliceDoc], styles: &Styles) -> (String, Vec<String>) {
-    let mut rows = String::new();
     let mut skipped = Vec::new();
-    for doc in docs {
-        if doc.slice_id.contains('\t') || doc.slice_id.contains('\n') {
-            skipped.push(doc.slice_id.clone());
-            continue;
-        }
+    let valid = docs
+        .iter()
+        .filter(|doc| {
+            let bad = doc.slice_id.is_empty() || doc.slice_id.chars().any(char::is_whitespace);
+            if bad {
+                skipped.push(doc.slice_id.clone());
+            }
+            !bad
+        })
+        .collect::<Vec<_>>();
+    let width = valid
+        .iter()
+        .map(|doc| doc.slice_id.len())
+        .max()
+        .unwrap_or(0);
+    let mut rows = String::new();
+    for doc in valid {
+        let pad = " ".repeat(width.saturating_sub(doc.slice_id.len()));
         let loc = doc.loc.map_or(String::new(), |loc| format!(" ({loc} LoC)"));
         rows.push_str(&doc.slice_id);
-        rows.push('\t');
+        rows.push_str(&pad);
+        rows.push_str("  ");
         rows.push_str(&doc.description);
         rows.push_str(&styles.paint(styles.dim, &loc));
         rows.push('\n');
@@ -481,9 +496,9 @@ fn build_browse_rows(docs: &[SliceDoc], styles: &Styles) -> (String, Vec<String>
     (rows, skipped)
 }
 
-/// Extract the hidden `slice_id` (field 1) from a selected fzf line.
+/// Extract the slice_id (first whitespace-delimited token) from a selected fzf line.
 fn selected_slice_id(line: &str) -> &str {
-    line.split('\t').next().unwrap_or("").trim()
+    line.split_whitespace().next().unwrap_or("")
 }
 
 /// Wrap `cmd` in an fzf action delimiter that does not occur in `cmd`, so a path
@@ -545,10 +560,6 @@ pub fn browse(
     let mut command = Command::new("fzf");
     command
         .arg("--ansi")
-        .arg("--delimiter")
-        .arg("\t")
-        .arg("--with-nth")
-        .arg("2..")
         .arg("--preview")
         .arg(&preview)
         .arg("--bind")
@@ -1559,29 +1570,37 @@ mod tests {
     }
 
     #[test]
-    fn browse_rows_are_tab_delimited_id_then_description() {
-        let docs = vec![slice("auth-service", "Auth and sessions", Some(45))];
+    fn browse_rows_show_id_first_padded_then_description() {
+        let docs = vec![
+            slice("auth", "Auth and sessions", Some(45)),
+            slice("data-model", "Core types", None),
+        ];
         let styles = Styles::resolve(ColorChoice::Never);
         let (rows, skipped) = build_browse_rows(&docs, &styles);
         assert!(skipped.is_empty());
-        assert_eq!(rows, "auth-service\tAuth and sessions (45 LoC)\n");
+        // ids padded to the widest ("data-model" = 10) so descriptions line up.
         assert_eq!(
-            selected_slice_id("auth-service\tAuth and sessions (45 LoC)"),
-            "auth-service"
+            rows,
+            "auth        Auth and sessions (45 LoC)\ndata-model  Core types\n"
+        );
+        // The id is the first whitespace token of a selected line.
+        assert_eq!(
+            selected_slice_id("auth        Auth and sessions (45 LoC)"),
+            "auth"
         );
     }
 
     #[test]
-    fn browse_rows_skip_ids_with_tab_or_newline() {
+    fn browse_rows_skip_ids_with_whitespace() {
         let docs = vec![
             slice("good", "ok", None),
+            slice("bad id", "nope", None),
             slice("bad\tid", "nope", None),
-            slice("bad\nid", "nope", None),
         ];
         let styles = Styles::resolve(ColorChoice::Never);
         let (rows, skipped) = build_browse_rows(&docs, &styles);
-        assert_eq!(rows, "good\tok\n");
-        assert_eq!(skipped, vec!["bad\tid".to_owned(), "bad\nid".to_owned()]);
+        assert_eq!(rows, "good  ok\n");
+        assert_eq!(skipped, vec!["bad id".to_owned(), "bad\tid".to_owned()]);
     }
 
     #[test]

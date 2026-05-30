@@ -11,34 +11,31 @@ against — so staleness is exact, and survives commits and rebases.
 
 ## Install
 
+`slice` is a single self-contained binary (Rust). Two ways to get it:
+
+**Prebuilt binary** — download the archive for your platform from the
+[latest release](https://github.com/scodge-24/slice-cli/releases/latest), unpack
+it, and put `slice` on your PATH.
+
+**Build from source** (needs a Rust toolchain):
+
 ```bash
-pipx install git+https://github.com/scodge-24/slice-cli      # isolated, gives you `slice`
-# or, for development:
 git clone https://github.com/scodge-24/slice-cli && cd slice-cli
-pip install -e .
+cargo install --path rust/slice-rs        # installs the `slice` binary
 ```
 
-Requires Python 3.10+ and `git` on PATH.
+Requires `git` on PATH at runtime.
 
-From a source checkout, you can also run the CLI without installing it:
-
-```bash
-python -m slice_cli --repo examples/mock-repo list --json
-```
-
-## Rust Prototype
-
-This branch also contains a native Rust prototype at `rust/slice-rs`. It is not
-the public `slice` entry point yet; install/use the Python package above for the
-supported CLI. From a source checkout:
+From a checkout you can also run it without installing:
 
 ```bash
 cargo run --manifest-path rust/slice-rs/Cargo.toml -- --repo examples/mock-repo list --json
 ```
 
-The prototype currently mirrors the command surface for parity/performance
-testing. Replacement requires the gates in
-[`design/rust-gap-closure-plan.md`](design/rust-gap-closure-plan.md).
+> A Python implementation lives in `slice_cli/`. It is no longer the shipped CLI
+> — it is retained as the parity test **oracle** (run as `python -m slice_cli`)
+> and will be removed once the Rust test suite is self-sufficient. See
+> [`design/rust-gap-closure-plan.md`](design/rust-gap-closure-plan.md).
 
 ## 60-second tour
 
@@ -117,13 +114,12 @@ Code). Two ways to install it, both work across machines:
 ```bash
 claude plugin marketplace add scodge-24/slice-cli
 claude plugin install slice-cli@slice-cli
-pip install slice-cli            # the plugin's skill calls `slice` on PATH
+# install the `slice` binary (see Install above) so the skill finds it on PATH
 ```
 
 **Or bootstrap it from the CLI (no plugin system):**
 
 ```bash
-pip install slice-cli
 slice init --agent --global      # writes the skill + agent into ~/.claude
 ```
 

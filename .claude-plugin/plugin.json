@@ -1,7 +1,7 @@
 {
   "name": "slice-cli",
   "version": "0.1.0",
-  "description": "Codebase slicing for AI agents: generate slice definitions and track doc-code staleness. Bundles the slice-codebase skill, codebase-slicer agent, and slice_cli package.",
+  "description": "Codebase slicing for AI agents: generate slice definitions and track doc-code staleness. Bundles the slice-codebase skill, codebase-slicer agent, and the slice CLI (Rust binary).",
   "author": {
     "name": "scodge"
   }

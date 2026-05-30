@@ -1,27 +1,34 @@
 # Contributing to slice-cli
 
-Thanks for your interest. slice-cli is a small Python package; contributions
-that keep it simple and well-tested are very welcome.
+Thanks for your interest. slice-cli is a small Rust CLI with a Python parity
+oracle; contributions that keep it simple and well-tested are very welcome.
 
 ## Dev setup
 
+The shipped CLI is Rust (`rust/slice-rs`). Its parity tests shell out to the
+Python oracle, so you need both toolchains:
+
 ```bash
 git clone https://github.com/scodge-24/slice-cli && cd slice-cli
-pip install -e ".[dev]"
-pytest          # the suite builds throwaway git repos in tmp dirs (~10s)
+pip install -e ".[dev]"                                   # the parity oracle
+cargo test --manifest-path rust/slice-rs/Cargo.toml       # Rust suite (~10s)
+pytest                                                    # oracle suite
 ```
 
 ## Conventions
 
-- **Keep changes focused.** The CLI lives in the `slice_cli/` package; put code
-  in the module that owns the concern instead of growing `cli.py`.
+- **Keep changes focused.** The shipped CLI lives in `rust/slice-rs/src/`; put
+  code in the module that owns the concern. The `slice_cli/` Python package is
+  the parity oracle only — don't add features there (it's being phased out).
 - **`slices_cli_upstream.py` is a read-only reference.** Do not edit it. Compare
   against it to understand divergence from the upstream implementation. It is not
-  shipped in the published package.
-- **Tests are not optional.** Every code path should have coverage; the suite
-  uses temp git repos via the `repo` fixture. Prefer
-  asserting on `--json` output over matching human text.
-- **Types stay strict.** The code is fully type-hinted; `pyright` runs in CI.
+  shipped.
+- **Tests are not optional.** Every code path should have coverage; the suites
+  use temp git repos. Prefer asserting on `--json` output over matching human
+  text. New Rust behavior should be pinned by a parity test (against the Python
+  oracle) or a committed snapshot.
+- **Lints stay clean.** `cargo fmt --check` and `cargo clippy -- -D warnings` run
+  in CI; the Python oracle stays `pyright`-clean.
 - **Staleness is fingerprint-anchored.** `slice stamp` records a content hash of
   a doc's tracked files; `verified_at` is a human note. See
   `design/manifest-schema.md`.
@@ -30,13 +37,19 @@ pytest          # the suite builds throwaway git repos in tmp dirs (~10s)
 ## Before opening a PR
 
 ```bash
-pytest
-pyright    # if installed
+cargo fmt --check --manifest-path rust/slice-rs/Cargo.toml
+cargo clippy --manifest-path rust/slice-rs/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path rust/slice-rs/Cargo.toml
+pytest                                                    # oracle
 ```
 
 Run these green, describe what changed and why, and link any related issue.
 
 ## Module map
+
+The Rust CLI mirrors these concerns in `rust/slice-rs/src/` (`check.rs`,
+`commands.rs`, `context.rs`, `paths.rs`, `index.rs`, `init.rs`, `slices.rs`,
+`manifest.rs`, `git_backend.rs`, `cli.rs`). The table maps the Python oracle:
 
 | I want to change... | Look in |
 |---------------------|---------|

@@ -9,7 +9,7 @@ effort: medium
 
 Ensure the repo has current slice definitions, using the `codebase-slicer` subagent for scanning and the `slice` CLI for validation.
 
-**Running the slice CLI.** Steps below call `slice <cmd>`. Use `slice` if it is on PATH (the `pip install slice-cli` entry point). If it is not, fall back to the bundled package from the plugin checkout: `PYTHONPATH="$CLAUDE_PLUGIN_ROOT" python3 -m slice_cli <cmd>` (when running as the slice-cli plugin) or `PYTHONPATH=/path/to/slice-cli python3 -m slice_cli <cmd>`.
+**Running the slice CLI.** Steps below call `slice <cmd>`. Use `slice` if it is on PATH (the prebuilt binary or `cargo install --path rust/slice-rs`). If it is not, fall back to building from the checkout: `cargo run --manifest-path "$CLAUDE_PLUGIN_ROOT/rust/slice-rs/Cargo.toml" -- <cmd>` (when running as the slice-cli plugin) or `cargo run --manifest-path /path/to/slice-cli/rust/slice-rs/Cargo.toml -- <cmd>` (needs a Rust toolchain).
 
 **Subagent type.** The scan agent is referenced below as `slice-cli:codebase-slicer` (its name when installed via the slice-cli plugin). If slicing was bootstrapped with `slice init --agent` instead, the agent is installed loose as plain `codebase-slicer` — use that name.
 

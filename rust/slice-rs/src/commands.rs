@@ -115,6 +115,8 @@ pub fn show(
     }
     let manifest = load_doc_manifest(ctx)?;
     let linked_docs = docs_for_slice(&manifest.docs, &doc.slice_id);
+    // The lede serves both the json `overview` field and the human overview block.
+    let lede = slice_lede(&load_slice_body(ctx, doc)?);
     if json {
         let output = ShowSlice {
             abstractions: &doc.abstractions,
@@ -133,6 +135,7 @@ pub fn show(
             exclusions: &doc.exclusions,
             files: &doc.files,
             loc: doc.loc,
+            overview: lede,
             slice_id: &doc.slice_id,
         };
         emit_json(&output)?;
@@ -150,6 +153,17 @@ pub fn show(
             styles.paint(styles.id, &doc.slice_id)
         );
         println!("{} {}", key("description:"), doc.description);
+        if !lede.is_empty() {
+            println!("{}", key("overview:"));
+            for line in lede.lines() {
+                if line.is_empty() {
+                    println!();
+                } else {
+                    println!("  {line}");
+                }
+            }
+            println!();
+        }
         println!(
             "{} {}",
             key("loc:"),
@@ -496,7 +510,7 @@ fn build_browse_rows(docs: &[SliceDoc], styles: &Styles) -> (String, Vec<String>
     (rows, skipped)
 }
 
-/// Extract the slice_id (first whitespace-delimited token) from a selected fzf line.
+/// Extract the `slice_id` (first whitespace-delimited token) from a selected fzf line.
 fn selected_slice_id(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or("")
 }
@@ -1482,6 +1496,27 @@ fn section_text<'a>(sections: &'a [(String, String)], name: &str) -> Option<&'a 
         .map(|(_, text)| text.as_str())
 }
 
+/// The slice's lede: the prose summary before the first `## ` section. A leading
+/// `# Title` H1 is dropped — slice files are generated with the title as an H1, which
+/// is redundant with `slice_id` and looks odd in a non-rendered terminal.
+fn slice_lede(body: &str) -> String {
+    let mut lines = body.lines().peekable();
+    if let Some(first) = lines.peek()
+        && first.starts_with("# ")
+        && !first.starts_with("## ")
+    {
+        lines.next();
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        if line.starts_with("## ") {
+            break;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_owned()
+}
+
 pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
@@ -1551,7 +1586,10 @@ fn python_list_repr(values: &[String]) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_browse_rows, extract_sections, fzf_action, section_text, selected_slice_id};
+    use super::{
+        build_browse_rows, extract_sections, fzf_action, section_text, selected_slice_id,
+        slice_lede,
+    };
     use crate::color::{ColorChoice, Styles};
     use crate::models::SliceDoc;
 
@@ -1614,6 +1652,33 @@ mod tests {
         let with_paren = fzf_action("change-preview", "'/p)(q' show {1}");
         assert!(!with_paren.starts_with("change-preview("));
         assert!(with_paren.starts_with("change-preview"));
+    }
+
+    #[test]
+    fn slice_lede_strips_h1_and_stops_at_first_section() {
+        let body = "# Backend Auth\n\nThis slice owns auth.\n\nSecond paragraph.\n\n## Runtime Flows\n\na -> b\n";
+        assert_eq!(
+            slice_lede(body),
+            "This slice owns auth.\n\nSecond paragraph."
+        );
+    }
+
+    #[test]
+    fn slice_lede_keeps_prose_when_no_h1() {
+        // The mock auth-service shape: prose straight after frontmatter, no H1.
+        let body = "Handles JWT verification.\n\n## System Behavior\n\nx\n";
+        assert_eq!(slice_lede(body), "Handles JWT verification.");
+    }
+
+    #[test]
+    fn slice_lede_is_empty_for_title_only_then_section() {
+        assert_eq!(slice_lede("# Title\n\n## Runtime Flows\n\na -> b\n"), "");
+    }
+
+    #[test]
+    fn slice_lede_is_empty_for_sections_only_or_empty_body() {
+        assert_eq!(slice_lede("## System Behavior\n\nx\n"), "");
+        assert_eq!(slice_lede(""), "");
     }
 
     #[test]

@@ -21,6 +21,8 @@ jobs:
         run: |
           git config --global user.email ci@example.com
           git config --global user.name CI
+      - name: Install ripgrep (slice grep shells out to rg)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: cargo fmt --check --manifest-path rust/slice-rs/Cargo.toml
       - run: cargo clippy --manifest-path rust/slice-rs/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path rust/slice-rs/Cargo.toml

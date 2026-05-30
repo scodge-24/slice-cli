@@ -26,7 +26,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
@@ -51,7 +51,7 @@ jobs:
           7z a "slice-${{ matrix.target }}.zip" "$bin"
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             slice-${{ matrix.target }}.tar.gz

@@ -74,12 +74,6 @@ impl Styles {
         }
     }
 
-    /// Whether this palette emits color.
-    #[must_use]
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
     fn plain() -> Self {
         let s = Style::new();
         Self {
@@ -125,20 +119,52 @@ impl Styles {
         if !self.enabled || needle.is_empty() {
             return text.to_owned();
         }
-        let haystack = text.to_lowercase();
-        let lower_needle = needle.to_lowercase();
+        // Match over the original `text` by whole characters so every slice lands on a
+        // char boundary. Lowercasing is not length-preserving (`İ` 2→3 bytes, `ẞ` 3→2),
+        // so the old "find on text.to_lowercase(), slice the original" approach skewed
+        // offsets and could panic on a non-char-boundary slice.
+        let needle_lower: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
         let mut out = String::with_capacity(text.len());
         let mut cursor = 0;
-        while let Some(rel) = haystack[cursor..].find(&lower_needle) {
-            let start = cursor + rel;
-            let end = start + lower_needle.len();
-            out.push_str(&text[cursor..start]);
-            out.push_str(&self.paint(self.needle, &text[start..end]));
-            cursor = end;
+        while cursor < text.len() {
+            if let Some(len) = match_prefix(&text[cursor..], &needle_lower) {
+                let end = cursor + len;
+                out.push_str(&self.paint(self.needle, &text[cursor..end]));
+                cursor = end;
+            } else {
+                let ch = text[cursor..].chars().next().expect("cursor < len");
+                out.push(ch);
+                cursor += ch.len_utf8();
+            }
         }
-        out.push_str(&text[cursor..]);
         out
     }
+}
+
+/// If `tail` begins with `needle_lower` under Unicode case folding, return the number
+/// of **bytes of `tail`** the match consumes. Matching advances by whole characters of
+/// `tail`, so the returned length always falls on a char boundary. A character whose
+/// lowercase expansion is longer than the remaining needle still counts as a full match
+/// of that character (the whole char is highlighted).
+fn match_prefix(tail: &str, needle_lower: &[char]) -> Option<usize> {
+    let mut idx = 0;
+    let mut byte = 0;
+    for ch in tail.chars() {
+        if idx == needle_lower.len() {
+            return Some(byte);
+        }
+        for lc in ch.to_lowercase() {
+            if idx == needle_lower.len() {
+                break;
+            }
+            if needle_lower[idx] != lc {
+                return None;
+            }
+            idx += 1;
+        }
+        byte += ch.len_utf8();
+    }
+    (idx == needle_lower.len()).then_some(byte)
 }
 
 /// Single-quote a path for safe interpolation into a shell command string (used when
@@ -209,6 +235,18 @@ mod tests {
         assert!(out.contains('\u{1b}'));
         // Stripping the escapes must restore the exact original text (case intact).
         assert_eq!(strip_ansi(&out), "Authentication AUTH auth");
+    }
+
+    #[test]
+    fn highlight_survives_length_changing_lowercase() {
+        // `İ` (U+0130) lowercases to two chars of a different byte length. A naive
+        // "find on text.to_lowercase(), slice the original" impl skews the byte offsets
+        // and panics slicing a non-char-boundary (here, inside the `é`). The needle must
+        // still match where it literally appears, and the visible text must round-trip.
+        let styles = Styles::resolve(ColorChoice::Always);
+        let out = styles.highlight("İİİx é parser", "x");
+        assert!(out.contains('\u{1b}'));
+        assert_eq!(strip_ansi(&out), "İİİx é parser");
     }
 
     #[test]

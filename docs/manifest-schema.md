@@ -79,7 +79,8 @@ Re-stamping a legacy entry migrates it to a fingerprint.
 
 ## Doc Frontmatter Schema
 
-Tracked docs use content-oriented frontmatter. Slice IDs do not appear here.
+Tracked docs use content-oriented frontmatter. Slice IDs do not appear here. The one
+optional exception is `tracks:` — a bootstrap-only list of code paths (see below).
 
 ```yaml
 ---
@@ -89,6 +90,8 @@ kind: design                        # design | guide | reference | adr | runbook
 status: active                      # active | draft | archived | superseded
 tags: [boundary, contracts, ownership]
 aliases: [BCS, boundary spec]       # optional alternate names
+tracks:                             # optional, bootstrap-only seed (see field reference)
+  - rust/crates/abc_types/src/state.rs
 summary: >-
   Ownership rules, naming invariants, and adapter patterns
   for the Rust simulation pipeline.
@@ -106,6 +109,7 @@ summary: >-
 | `tags` | No | Human-semantic tags. Searchable via `slice find`. |
 | `aliases` | No | Optional alternate names for the doc. |
 | `summary` | No | One-sentence description for agent context. Low token cost, high signal. |
+| `tracks` | No | Bootstrap-only list of code paths the doc describes. Read once by `slice init --docs` / `slice docs-bootstrap` to resolve the doc's owning slices into `DOCS.yaml`, then ignored — not stored in the manifest and not a runtime mapping source. |
 
 ## Validation Rules (slice check)
 

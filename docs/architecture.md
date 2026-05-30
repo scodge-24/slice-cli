@@ -139,25 +139,34 @@ wiki like Obsidian if you want one).
 
 ---
 
-## ADR-004: Doc frontmatter decoupled from slice IDs
+## ADR-004: Doc frontmatter decoupled from the runtime slice mapping
 
 **Status**: Accepted
 
-**Context**: Earlier designs put `tracks:` (file path lists) or slice ID tags in doc
-frontmatter. This created dual-write drift between docs and the manifest.
+**Context**: Earlier designs put slice ID tags (or an ongoing file-path list) in doc
+frontmatter as the *live* mapping. Reading that mapping from two places — frontmatter and
+the manifest — created dual-write drift between docs and `DOCS.yaml`.
 
-**Decision**: Doc frontmatter contains only content-oriented metadata (`doc_id`, `title`,
-`kind`, `status`, `tags`, `summary`). No slice IDs, no file path lists.
+**Decision**: `DOCS.yaml` is the single runtime source of the doc→slice mapping. Doc
+frontmatter carries content-oriented metadata (`doc_id`, `title`, `kind`, `status`, `tags`,
+`summary`) and no slice IDs. The one exception is an optional **`tracks:` list of code
+paths**, which is a *write-once bootstrap seed*: `slice init --docs` and `slice
+docs-bootstrap` read it once to resolve each doc's owning slices into `DOCS.yaml`. It is not
+a runtime source — once the manifest exists, `DOCS.yaml` owns the mapping and `tracks:` is
+ignored.
 
 **Rationale**:
-- Single source of truth: DOCS.yaml owns the mapping, docs own the content
-- No dual-write drift between two files
+- Single source of truth at runtime: DOCS.yaml owns the mapping, docs own the content
+- No dual-write drift — `tracks:` is read at bootstrap, never compared against the manifest
+- `tracks:` lets authors seed the mapping from the doc they're already editing instead of
+  hand-writing `DOCS.yaml` slice lists by guessing which slices own which paths
 - Doc frontmatter stays small — avoids token bloat when agents read docs
 - Tags in docs are human-semantic ("design", "numerics"), not operational ("rust-abc-types")
 
 **Consequences**:
-- Agents cannot determine a doc's tracked slices by reading the doc alone — they must query
-  the manifest via `slice docs <id>` or `slice affected-docs`
+- After bootstrap, agents cannot determine a doc's *current* tracked slices by reading the
+  doc alone — they query the manifest via `slice docs <id>` or `slice affected-docs`
+- Editing `tracks:` after bootstrap has no effect until you re-run `slice docs-bootstrap`
 - This is acceptable because agents should start from code context (slice CLI), not doc context
 
 ---

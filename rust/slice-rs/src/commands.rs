@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::color::Styles;
+use crate::color::{ColorChoice, Styles, shell_quote};
 use crate::config::{Ambiguity, load_ambiguity};
 use crate::context::Context;
 use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
@@ -457,6 +457,156 @@ pub fn find(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<
         );
     }
     Ok(0)
+}
+
+/// Build the tab-delimited fzf rows (`slice_id\tdescription (LoC)`). The hidden
+/// `slice_id` is field 1; fzf shows fields 2+. Slices whose id contains a tab or
+/// newline are skipped (returned in the second tuple element) so the delimiter
+/// protocol can't be corrupted.
+fn build_browse_rows(docs: &[SliceDoc], styles: &Styles) -> (String, Vec<String>) {
+    let mut rows = String::new();
+    let mut skipped = Vec::new();
+    for doc in docs {
+        if doc.slice_id.contains('\t') || doc.slice_id.contains('\n') {
+            skipped.push(doc.slice_id.clone());
+            continue;
+        }
+        let loc = doc.loc.map_or(String::new(), |loc| format!(" ({loc} LoC)"));
+        rows.push_str(&doc.slice_id);
+        rows.push('\t');
+        rows.push_str(&doc.description);
+        rows.push_str(&styles.paint(styles.dim, &loc));
+        rows.push('\n');
+    }
+    (rows, skipped)
+}
+
+/// Extract the hidden `slice_id` (field 1) from a selected fzf line.
+fn selected_slice_id(line: &str) -> &str {
+    line.split('\t').next().unwrap_or("").trim()
+}
+
+/// Wrap `cmd` in an fzf action delimiter that does not occur in `cmd`, so a path
+/// containing `)` can't prematurely close a `change-preview(...)` action.
+fn fzf_action(action: &str, cmd: &str) -> String {
+    for (open, close) in [('(', ')'), ('[', ']'), ('<', '>')] {
+        if !cmd.contains(open) && !cmd.contains(close) {
+            return format!("{action}{open}{cmd}{close}");
+        }
+    }
+    for delim in ['~', '!', '@', '#', '%', '^', '|'] {
+        if !cmd.contains(delim) {
+            return format!("{action}{delim}{cmd}{delim}");
+        }
+    }
+    format!("{action}({cmd})")
+}
+
+pub fn browse(
+    ctx: &Context,
+    query: Option<&str>,
+    print: bool,
+    styles: &Styles,
+    color: ColorChoice,
+) -> Result<i32> {
+    let docs = load_slice_docs_meta(ctx)?;
+    if docs.is_empty() {
+        eprintln!("no slices found in slices/");
+        return Ok(1);
+    }
+
+    // The fzf list and preview always carry color (it renders via --ansi), except
+    // when the user explicitly opted out with --color=never.
+    let view_choice = if matches!(color, ColorChoice::Never) {
+        ColorChoice::Never
+    } else {
+        ColorChoice::Always
+    };
+    let view_styles = Styles::resolve(view_choice);
+    let preview_color = if matches!(color, ColorChoice::Never) {
+        "never"
+    } else {
+        "always"
+    };
+
+    let (rows, skipped) = build_browse_rows(&docs, &view_styles);
+    for id in &skipped {
+        eprintln!("skipping slice with malformed id: {id:?}");
+    }
+
+    // fzf runs preview/bind commands via $SHELL -c, so the exe and repo paths must
+    // be shell-quoted; `{1}` is left for fzf to substitute and quote itself.
+    let exe = std::env::current_exe()?;
+    let q_exe = shell_quote(&exe.to_string_lossy());
+    let q_repo = shell_quote(&ctx.repo_root().to_string_lossy());
+    let base = format!("{q_exe} --repo {q_repo} --color={preview_color}");
+    let preview = format!("{base} show {{1}}");
+
+    let mut command = Command::new("fzf");
+    command
+        .arg("--ansi")
+        .arg("--delimiter")
+        .arg("\t")
+        .arg("--with-nth")
+        .arg("2..")
+        .arg("--preview")
+        .arg(&preview)
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-f:{}",
+            fzf_action("change-preview", &format!("{base} files {{1}}"))
+        ))
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-d:{}",
+            fzf_action("change-preview", &format!("{base} deps {{1}}"))
+        ))
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-s:{}",
+            fzf_action("change-preview", &format!("{base} show {{1}}"))
+        ))
+        .arg("--header")
+        .arg("enter: show | ctrl-f: files | ctrl-d: deps | ctrl-s: back | ctrl-/: preview | esc: cancel")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(query) = query {
+        command.arg("-q").arg(query);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("fzf >= 0.30 is required for `slice browse`; install fzf and retry");
+            return Ok(2);
+        }
+        Err(err) => return Err(Error::Io(err)),
+    };
+
+    // Feed candidates on a thread; swallow BrokenPipe if fzf is dismissed early.
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(rows.as_bytes());
+    });
+    let output = child.wait_with_output()?;
+    let _ = writer.join();
+
+    let code = output.status.code().unwrap_or(1);
+    if code != 0 {
+        // 1 = no match, 130 = cancelled. Nothing selected.
+        return Ok(code);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let id = selected_slice_id(stdout.lines().next().unwrap_or(""));
+    if id.is_empty() {
+        return Ok(1);
+    }
+    if print {
+        println!("{id}");
+        Ok(0)
+    } else {
+        show(ctx, id, ShowMode::Metadata, false, styles)
+    }
 }
 
 pub fn grep(
@@ -1388,7 +1538,64 @@ fn python_list_repr(values: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_sections, section_text};
+    use std::path::PathBuf;
+
+    use super::{build_browse_rows, extract_sections, fzf_action, section_text, selected_slice_id};
+    use crate::color::{ColorChoice, Styles};
+    use crate::models::SliceDoc;
+
+    fn slice(id: &str, description: &str, loc: Option<u64>) -> SliceDoc {
+        SliceDoc {
+            slice_id: id.to_owned(),
+            doc_path: PathBuf::from(format!("slices/{id}.md")),
+            description: description.to_owned(),
+            loc,
+            files: Vec::new(),
+            abstractions: Vec::new(),
+            dependencies: Vec::new(),
+            exclusions: Vec::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn browse_rows_are_tab_delimited_id_then_description() {
+        let docs = vec![slice("auth-service", "Auth and sessions", Some(45))];
+        let styles = Styles::resolve(ColorChoice::Never);
+        let (rows, skipped) = build_browse_rows(&docs, &styles);
+        assert!(skipped.is_empty());
+        assert_eq!(rows, "auth-service\tAuth and sessions (45 LoC)\n");
+        assert_eq!(
+            selected_slice_id("auth-service\tAuth and sessions (45 LoC)"),
+            "auth-service"
+        );
+    }
+
+    #[test]
+    fn browse_rows_skip_ids_with_tab_or_newline() {
+        let docs = vec![
+            slice("good", "ok", None),
+            slice("bad\tid", "nope", None),
+            slice("bad\nid", "nope", None),
+        ];
+        let styles = Styles::resolve(ColorChoice::Never);
+        let (rows, skipped) = build_browse_rows(&docs, &styles);
+        assert_eq!(rows, "good\tok\n");
+        assert_eq!(skipped, vec!["bad\tid".to_owned(), "bad\nid".to_owned()]);
+    }
+
+    #[test]
+    fn fzf_action_avoids_delimiter_collisions() {
+        // No parens in the command → use the default ().
+        assert_eq!(
+            fzf_action("change-preview", "slice show {1}"),
+            "change-preview(slice show {1})"
+        );
+        // A ')' in the command forces a different delimiter than ().
+        let with_paren = fzf_action("change-preview", "'/p)(q' show {1}");
+        assert!(!with_paren.starts_with("change-preview("));
+        assert!(with_paren.starts_with("change-preview"));
+    }
 
     #[test]
     fn section_extraction_parses_h2_sections() {

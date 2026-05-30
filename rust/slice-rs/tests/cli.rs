@@ -1335,3 +1335,115 @@ fn list_marks_stale_doc_count() {
         "expected a [N stale] badge in list"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Lane B' — slice browse (fzf picker). Interactive selection is covered with a
+// stub `fzf` on PATH; live keystrokes are the one manual-only surface.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn browse_without_fzf_is_graceful() {
+    let repo = repo_root().join("examples/mock-repo");
+    let result = run_rust_raw_with_path(&repo, &["browse"], Some(""));
+    assert_eq!(result.0, 2);
+    assert!(stderr_text(&result).contains("fzf >= 0.30 is required"));
+}
+
+#[test]
+fn browse_empty_repo_short_circuits_before_fzf() {
+    // A repo with an empty slices/ dir: 0 slices must report cleanly and exit 1
+    // BEFORE fzf is spawned (real PATH, so fzf would be found if we reached it).
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("slices")).unwrap();
+    run_git(repo, &["init"]);
+    let result = run_rust_raw_for_repo(repo, &["browse"]);
+    assert_eq!(result.0, 1);
+    assert!(stderr_text(&result).contains("no slices found"));
+}
+
+/// Write an executable stub `fzf` into a temp dir that records its argv, drains
+/// stdin, prints `pick` (a literal tab-bearing line), and exits with `exit_code`.
+fn fake_fzf_dir(pick: &str, exit_code: i32, args_file: &Path) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fzf");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > /dev/null\nprintf '%s' '{}'\nexit {}\n",
+        args_file.display(),
+        pick,
+        exit_code
+    );
+    std::fs::write(&script, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    dir
+}
+
+fn run_browse_with_stub(stub_dir: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
+    let root = repo_root();
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{orig_path}", stub_dir.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_slice"))
+        .args(["--repo", "examples/mock-repo"])
+        .args(args)
+        .env("PATH", path)
+        .current_dir(&root)
+        .output()
+        .expect("slice browse runs");
+    (
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    )
+}
+
+#[test]
+fn browse_print_emits_selected_id() {
+    let args_file = tempfile::NamedTempFile::new().unwrap();
+    let stub = fake_fzf_dir("auth-service\tAuth and sessions", 0, args_file.path());
+    let result = run_browse_with_stub(stub.path(), &["browse", "--print"]);
+    assert_eq!(result.0, 0);
+    assert_eq!(stdout_text(&result), "auth-service\n");
+}
+
+#[test]
+fn browse_default_shows_selected_slice() {
+    let args_file = tempfile::NamedTempFile::new().unwrap();
+    let stub = fake_fzf_dir("auth-service\tAuth and sessions", 0, args_file.path());
+    let result = run_browse_with_stub(stub.path(), &["browse"]);
+    assert_eq!(result.0, 0);
+    assert!(stdout_text(&result).contains("slice_id: auth-service"));
+}
+
+#[test]
+fn browse_forwards_query_and_quotes_preview_paths() {
+    let args_file = tempfile::NamedTempFile::new().unwrap();
+    let stub = fake_fzf_dir("auth-service\tx", 0, args_file.path());
+    let result = run_browse_with_stub(stub.path(), &["browse", "-q", "auth"]);
+    assert_eq!(result.0, 0);
+    let recorded = std::fs::read_to_string(args_file.path()).unwrap();
+    assert!(recorded.contains("-q"), "query flag forwarded to fzf");
+    assert!(
+        recorded.lines().any(|l| l == "auth"),
+        "query value forwarded"
+    );
+    // The preview command interpolates the repo path single-quoted (shell-safe).
+    assert!(
+        recorded.contains("--repo '") && recorded.contains("show {1}"),
+        "preview must shell-quote the repo path: {recorded}"
+    );
+}
+
+#[test]
+fn browse_cancel_maps_to_exit_130() {
+    let args_file = tempfile::NamedTempFile::new().unwrap();
+    let stub = fake_fzf_dir("", 130, args_file.path());
+    let result = run_browse_with_stub(stub.path(), &["browse", "--print"]);
+    assert_eq!(result.0, 130);
+    assert!(stdout_text(&result).is_empty());
+}

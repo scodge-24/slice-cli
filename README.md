@@ -24,7 +24,8 @@ git clone https://github.com/scodge-24/slice-cli && cd slice-cli
 cargo install --path rust/slice-rs        # installs the `slice` binary
 ```
 
-Requires `git` on PATH at runtime.
+Requires `git` on PATH at runtime. `slice browse` additionally needs optional
+`fzf` (>= 0.30); every other command works without it.
 
 From a checkout you can also run it without installing:
 
@@ -84,6 +85,7 @@ stamped auth-guide -> 5fb503f...
 | `slice stale-docs` | Everything currently stale (exit 1 if any — handy as a CI gate) |
 | `slice stamp <doc>` | Mark a doc verified against current code |
 | `slice list` / `show` / `for` / `find` / `deps` | Navigate slices |
+| `slice browse` | Fuzzy-pick a slice with fzf, preview it inline (needs `fzf`) |
 | `slice check` | Integrity, staleness, and verification-link checks (`--require-verification` for V-model coverage) |
 | `slice init` | Wire `slice` into your repo (agent instructions, optional hook/CI) |
 
@@ -92,6 +94,16 @@ Run `slice <command> -h` for examples and flags.
 Human output (`list`/`show`/`find`/`stale-docs`) is colored when stdout is a
 terminal; control it with the global `--color=auto|always|never`. Pipes and
 `--json` are never colored, and `NO_COLOR` is honored.
+
+`slice browse` opens an `fzf` picker with a live preview pane. `enter` shows the
+selected slice; `ctrl-f` / `ctrl-d` / `ctrl-s` switch the preview to files / deps /
+back. `--print` emits the chosen slice id instead, for scripting:
+
+```bash
+id=$(slice browse --print) && slice show "$id"   # && guards against cancel
+```
+
+For machine consumption use `slice list --json`, not `browse`.
 
 ## Use it in your own repo
 

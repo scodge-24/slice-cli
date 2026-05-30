@@ -105,6 +105,20 @@ enum Command {
         json: bool,
     },
 
+    /// Fuzzy-pick a slice with fzf (interactive).
+    ///
+    /// Default: show the chosen slice. With --print: emit its id for piping,
+    /// e.g. `id=$(slice browse --print) && slice show "$id"`.
+    #[command(after_help = "Requires fzf >= 0.30 on PATH.")]
+    Browse {
+        /// Initial fuzzy query.
+        #[arg(short = 'q', long)]
+        query: Option<String>,
+        /// Print the selected slice id instead of showing the slice.
+        #[arg(long)]
+        print: bool,
+    },
+
     /// Run rg within a slice's files.
     Grep {
         selector: String,
@@ -214,7 +228,8 @@ pub fn run() -> anyhow::Result<i32> {
 )]
 fn run_inner(args: Args) -> Result<i32> {
     let ctx = Context::new(args.repo, args.slices_dir)?;
-    let styles = Styles::resolve(args.color);
+    let color = args.color;
+    let styles = Styles::resolve(color);
     match args.command {
         Command::List { json } => commands::list(&ctx, json, &styles),
         Command::Show {
@@ -256,6 +271,9 @@ fn run_inner(args: Args) -> Result<i32> {
             json,
         } => commands::context(&ctx, &selector, strict, best_effort, json),
         Command::Find { needle, json } => commands::find(&ctx, &needle, json, &styles),
+        Command::Browse { query, print } => {
+            commands::browse(&ctx, query.as_deref(), print, &styles, color)
+        }
         Command::Grep {
             selector,
             pattern,

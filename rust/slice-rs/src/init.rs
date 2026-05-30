@@ -182,3 +182,28 @@ fn make_executable(_path: &Path) -> Result<()> {
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map_or_else(PathBuf::new, PathBuf::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CODEBASE_SLICER_AGENT, SLICE_CODEBASE_SKILL, render_agent_block, upsert_block};
+
+    #[test]
+    fn embedded_templates_match_committed_files() {
+        assert_eq!(
+            SLICE_CODEBASE_SKILL,
+            include_str!("../../../skills/slice-codebase/SKILL.md")
+        );
+        assert_eq!(
+            CODEBASE_SLICER_AGENT,
+            include_str!("../../../agents/codebase-slicer.md")
+        );
+    }
+
+    #[test]
+    fn upsert_preserves_existing_content_and_replaces_owned_block() {
+        let first = upsert_block("# Existing\n", &render_agent_block());
+        assert!(first.starts_with("# Existing\n\n<!-- slice-cli:start -->"));
+        let second = upsert_block(&first, &render_agent_block());
+        assert_eq!(second.matches("<!-- slice-cli:start -->").count(), 1);
+    }
+}

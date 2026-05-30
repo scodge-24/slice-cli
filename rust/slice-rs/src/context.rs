@@ -11,6 +11,20 @@ pub struct Context {
 }
 
 impl Context {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_parts_for_test(
+        repo_root: PathBuf,
+        git_root: PathBuf,
+        slices_dir: PathBuf,
+    ) -> Self {
+        Self {
+            repo_root,
+            git_root,
+            slices_dir,
+        }
+    }
+
     pub fn new(repo: Option<PathBuf>, slices_dir: Option<PathBuf>) -> Result<Self> {
         let repo_root = match repo {
             Some(path) => path
@@ -86,6 +100,14 @@ impl Context {
 }
 
 fn discover_repo_root() -> Result<PathBuf> {
+    if let Ok(env_root) = env::var("SLICE_REPO") {
+        return PathBuf::from(env_root)
+            .canonicalize()
+            .map_err(|source| Error::Read {
+                path: PathBuf::from("SLICE_REPO"),
+                source,
+            });
+    }
     if let Ok(env_root) = env::var("SLICES_REPO_ROOT") {
         return PathBuf::from(env_root)
             .canonicalize()
@@ -123,5 +145,35 @@ fn absolutize(path: &Path) -> std::io::Result<PathBuf> {
         Ok(path.to_path_buf())
     } else {
         Ok(env::current_dir()?.join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Context;
+
+    #[test]
+    fn paths_are_derived_from_context_roots() {
+        let repo = std::path::PathBuf::from("/tmp/work/repo");
+        let git = std::path::PathBuf::from("/tmp/work");
+        let ctx = Context::from_parts_for_test(repo.clone(), git, repo.join("custom-slices"));
+
+        assert_eq!(
+            ctx.docs_manifest_path(),
+            repo.join("custom-slices/DOCS.yaml")
+        );
+        assert_eq!(ctx.rel(&repo.join("src/lib.rs")), "src/lib.rs");
+        assert_eq!(ctx.git_relative_path("src/lib.rs"), "repo/src/lib.rs");
+    }
+
+    #[test]
+    fn head_sha_is_unknown_outside_git_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = Context::from_parts_for_test(
+            temp.path().to_path_buf(),
+            temp.path().to_path_buf(),
+            temp.path().join("slices"),
+        );
+        assert_eq!(ctx.head_sha(), "unknown");
     }
 }

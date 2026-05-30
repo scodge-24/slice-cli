@@ -546,3 +546,51 @@ fn summarize(values: &[String]) -> String {
     }
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_abstraction, parse_upstream, parse_verification};
+
+    #[test]
+    fn verification_parser_extracts_links_and_upstream_refs() {
+        let body = "## Verification\n\n- `verify_token` <- tests/test_auth.py::test_valid, `tests/test_auth.py::test_empty`\n- upstream: docs/auth.md, `docs/design.md`\n";
+        let links = parse_verification(body);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].0, "verify_token");
+        assert_eq!(
+            links[0].1,
+            vec![
+                "tests/test_auth.py::test_valid",
+                "tests/test_auth.py::test_empty"
+            ]
+        );
+        assert_eq!(parse_upstream(body), vec!["docs/auth.md", "docs/design.md"]);
+    }
+
+    #[test]
+    fn verification_parser_ignores_freetext() {
+        let body = "## Verification\n\nThis is prose.\n- no arrow here\n- upstream:\n";
+        assert!(parse_verification(body).is_empty());
+        assert!(parse_upstream(body).is_empty());
+    }
+
+    #[test]
+    fn normalize_abstraction_removes_descriptive_suffix() {
+        assert_eq!(
+            normalize_abstraction("`verify_token — JWT verification`"),
+            "verify_token"
+        );
+        assert_eq!(
+            normalize_abstraction("create_session - makes a session"),
+            "create_session"
+        );
+    }
+
+    #[test]
+    fn verification_symbol_part_is_not_validated_as_a_file() {
+        let body = "## Verification\n\n- `verify_token` <- tests/test_auth.py::missing_symbol\n";
+        let links = parse_verification(body);
+        let file = links[0].1[0].split_once("::").unwrap().0;
+        assert_eq!(file, "tests/test_auth.py");
+    }
+}

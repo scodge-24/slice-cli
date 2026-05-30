@@ -31,6 +31,7 @@ enum Command {
     },
 
     /// Show one slice.
+    #[command(after_help = "Section flags: --body, --system, --call-stacks, and --verification.")]
     Show {
         selector: String,
         #[arg(long)]
@@ -79,6 +80,9 @@ enum Command {
     },
 
     /// Resolve a file path or slice to its owning slice context.
+    #[command(
+        after_help = "Examples:\n  slice context src/auth/middleware.py\n  slice context auth-service --json"
+    )]
     Context {
         selector: String,
         #[arg(long)]
@@ -114,6 +118,11 @@ enum Command {
     },
 
     /// List all stale docs across slices.
+    ///
+    /// Exits 0 when all tracked docs are current, 1 when any doc is stale.
+    #[command(
+        after_help = "Exit codes: 0 when all docs are current; exit 1 when any doc is stale."
+    )]
     StaleDocs {
         #[arg(long)]
         json: bool,
@@ -164,6 +173,11 @@ enum Command {
     },
 
     /// Wire slice-cli into this repo.
+    ///
+    /// Examples:
+    ///   slice init
+    ///   slice init --hook --ci --agent
+    #[command(after_help = "Examples:\n  slice init\n  slice init --hook --ci --agent")]
     Init {
         #[arg(long)]
         hook: bool,

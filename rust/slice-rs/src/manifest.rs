@@ -115,3 +115,43 @@ fn write_string_list(content: &mut String, key: &str, values: &[String]) {
         content.push('\n');
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::load_doc_manifest;
+    use crate::context::Context;
+
+    fn ctx(root: &std::path::Path) -> Context {
+        Context::from_parts_for_test(root.to_path_buf(), root.join(".git"), root.join("slices"))
+    }
+
+    #[test]
+    fn load_returns_empty_without_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("slices")).unwrap();
+        let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
+        assert!(manifest.docs.is_empty());
+        assert_eq!(manifest.vault_root_raw, None);
+    }
+
+    #[test]
+    fn load_preserves_fields_and_vault_root() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("slices")).unwrap();
+        std::fs::write(
+            temp.path().join("slices/DOCS.yaml"),
+            "vault_root: ../docs\ndocs:\n  guide:\n    path: guide.md\n    slices:\n    - auth\n    verified_at: abc123\n    fingerprint: fp\n    tags:\n    - t1\n    include:\n    - src/*.rs\n    exclude:\n    - src/generated.rs\n",
+        )
+        .unwrap();
+        let manifest = load_doc_manifest(&ctx(temp.path())).unwrap();
+        assert_eq!(manifest.vault_root_raw.as_deref(), Some("../docs"));
+        assert_eq!(manifest.docs[0].doc_id, "guide");
+        assert_eq!(manifest.docs[0].path, "guide.md");
+        assert_eq!(manifest.docs[0].slices, vec!["auth"]);
+        assert_eq!(manifest.docs[0].verified_at, "abc123");
+        assert_eq!(manifest.docs[0].fingerprint, "fp");
+        assert_eq!(manifest.docs[0].tags, vec!["t1"]);
+        assert_eq!(manifest.docs[0].include, vec!["src/*.rs"]);
+        assert_eq!(manifest.docs[0].exclude, vec!["src/generated.rs"]);
+    }
+}

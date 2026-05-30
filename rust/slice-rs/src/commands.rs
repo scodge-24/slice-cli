@@ -571,7 +571,7 @@ pub fn stamp(
     let mut updated = Vec::with_capacity(manifest.docs.len());
     for mut doc in manifest.docs {
         if target_ids.contains(doc.doc_id.as_str()) {
-            let concrete = resolve_tracked_files(&doc, &by_id)
+            let concrete = resolve_tracked_files(&doc, &by_id, ctx)
                 .iter()
                 .flat_map(|file| expand_literal_or_existing(file, ctx))
                 .map(|file| ctx.git_relative_path(&file))
@@ -921,7 +921,7 @@ pub fn stale_docs_for(
             .filter(|sid| by_id.contains_key(sid.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let tracked_files = resolve_tracked_files(doc, &by_id);
+        let tracked_files = resolve_tracked_files(doc, &by_id, ctx);
         if tracked_files.is_empty() {
             continue;
         }
@@ -1183,8 +1183,9 @@ fn transitive_deps(start: &str, docs: &[SliceDoc]) -> Vec<String> {
 fn resolve_tracked_files(
     doc: &crate::models::TrackedDoc,
     by_id: &FxHashMap<&str, &SliceDoc>,
+    ctx: &Context,
 ) -> Vec<String> {
-    let mut files = if doc.include.is_empty() {
+    let files = if doc.include.is_empty() {
         let mut files = Vec::new();
         for sid in &doc.slices {
             if let Some(slice) = by_id.get(sid.as_str()) {
@@ -1195,6 +1196,17 @@ fn resolve_tracked_files(
     } else {
         doc.include.clone()
     };
+    let mut files = files
+        .into_iter()
+        .flat_map(|file| {
+            let expanded = expand_literal_or_existing(&file, ctx);
+            if expanded.is_empty() {
+                vec![file]
+            } else {
+                expanded
+            }
+        })
+        .collect::<Vec<_>>();
     if !doc.exclude.is_empty() {
         files.retain(|file| {
             !doc.exclude
@@ -1309,4 +1321,31 @@ fn python_list_repr(values: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{items}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_sections, section_text};
+
+    #[test]
+    fn section_extraction_parses_h2_sections() {
+        let sections =
+            extract_sections("intro\n\n## System Behavior\n\nRuns.\n\n## Verification\n\n- ok\n");
+        assert_eq!(section_text(&sections, "System Behavior"), Some("Runs."));
+        assert_eq!(section_text(&sections, "verification"), Some("- ok"));
+    }
+
+    #[test]
+    fn section_extraction_ignores_h3_headings() {
+        let sections = extract_sections("## System Behavior\n\n### Detail\ntext\n");
+        assert_eq!(
+            section_text(&sections, "System Behavior"),
+            Some("### Detail\ntext")
+        );
+    }
+
+    #[test]
+    fn section_extraction_is_empty_without_h2_headings() {
+        assert!(extract_sections("# Title\n\nbody").is_empty());
+    }
 }

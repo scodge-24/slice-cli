@@ -563,6 +563,7 @@ dependencies = [
 name = "slice-rs"
 version = "0.1.0"
 dependencies = [
+ "anstyle",
  "anyhow",
  "assert_cmd",
  "clap",

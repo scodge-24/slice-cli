@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::color::Styles;
 use crate::config::{Ambiguity, load_ambiguity};
 use crate::context::Context;
 use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
@@ -40,7 +41,7 @@ pub enum ShowMode {
     Verification,
 }
 
-pub fn list(ctx: &Context, json: bool) -> Result<i32> {
+pub fn list(ctx: &Context, json: bool, styles: &Styles) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     if json {
@@ -55,29 +56,54 @@ pub fn list(ctx: &Context, json: bool) -> Result<i32> {
             .collect::<Vec<_>>();
         emit_json(&rows)?;
     } else {
+        // Stale set is a human-path-only concern; the --json shape above is unchanged.
+        let stale_ids = stale_docs_for(ctx, &docs, &manifest.docs, StalenessMode::Fast)
+            .into_iter()
+            .map(|stale| stale.doc_id)
+            .collect::<FxHashSet<_>>();
         let width = docs
             .iter()
             .map(|doc| doc.slice_id.len())
             .max()
             .unwrap_or(10);
-        for doc in docs {
+        for doc in &docs {
+            let pad = " ".repeat(width.saturating_sub(doc.slice_id.len()));
             let loc = doc.loc.map_or(String::new(), |loc| format!(" ({loc} LoC)"));
-            let doc_count = docs_for_slice(&manifest.docs, &doc.slice_id).len();
-            let doc_label = if doc_count == 0 {
+            let linked = docs_for_slice(&manifest.docs, &doc.slice_id);
+            let doc_label = if linked.is_empty() {
                 String::new()
             } else {
-                format!(" [{doc_count} docs]")
+                format!(" [{} docs]", linked.len())
+            };
+            let stale_count = linked
+                .iter()
+                .filter(|tracked| stale_ids.contains(&tracked.doc_id))
+                .count();
+            let stale_label = if stale_count == 0 {
+                String::new()
+            } else {
+                styles.paint(styles.stale, &format!(" [{stale_count} stale]"))
             };
             println!(
-                "{:<width$}  {}{}{}",
-                doc.slice_id, doc.description, loc, doc_label
+                "{}{pad}  {}{}{}{}",
+                styles.paint(styles.id, &doc.slice_id),
+                doc.description,
+                styles.paint(styles.dim, &loc),
+                styles.paint(styles.dim, &doc_label),
+                stale_label,
             );
         }
     }
     Ok(0)
 }
 
-pub fn show(ctx: &Context, selector: &str, mode: ShowMode, json: bool) -> Result<i32> {
+pub fn show(
+    ctx: &Context,
+    selector: &str,
+    mode: ShowMode,
+    json: bool,
+    styles: &Styles,
+) -> Result<i32> {
     let docs = if matches!(mode, ShowMode::Metadata) {
         load_slice_docs_meta(ctx)?
     } else {
@@ -111,18 +137,30 @@ pub fn show(ctx: &Context, selector: &str, mode: ShowMode, json: bool) -> Result
         };
         emit_json(&output)?;
     } else {
-        println!("slice_id: {}", doc.slice_id);
-        println!("description: {}", doc.description);
+        // verified_at is reddened when stale; compute the stale set over linked docs.
+        let relevant = linked_docs.iter().copied().cloned().collect::<Vec<_>>();
+        let stale_ids = stale_docs_for(ctx, &docs, &relevant, StalenessMode::Fast)
+            .into_iter()
+            .map(|stale| stale.doc_id)
+            .collect::<FxHashSet<_>>();
+        let key = |label: &str| styles.paint(styles.dim, label);
         println!(
-            "loc: {}",
+            "{} {}",
+            key("slice_id:"),
+            styles.paint(styles.id, &doc.slice_id)
+        );
+        println!("{} {}", key("description:"), doc.description);
+        println!(
+            "{} {}",
+            key("loc:"),
             doc.loc.map_or_else(|| "null".to_owned(), |v| v.to_string())
         );
-        println!("doc_path: {}", ctx.rel(&doc.doc_path));
-        print_list("files", &doc.files);
-        print_list("dependencies", &doc.dependencies);
-        print_list("abstractions", &doc.abstractions);
-        print_list("exclusions", &doc.exclusions);
-        print_tracked_docs("docs", &linked_docs);
+        println!("{} {}", key("doc_path:"), ctx.rel(&doc.doc_path));
+        print_list_colored("files", &doc.files, styles, None);
+        print_list_colored("dependencies", &doc.dependencies, styles, Some(styles.dep));
+        print_list_colored("abstractions", &doc.abstractions, styles, None);
+        print_list_colored("exclusions", &doc.exclusions, styles, None);
+        print_tracked_docs("docs", &linked_docs, styles, &stale_ids);
     }
     Ok(0)
 }
@@ -389,7 +427,7 @@ pub fn context(
     Ok(0)
 }
 
-pub fn find(ctx: &Context, needle: &str, json: bool) -> Result<i32> {
+pub fn find(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<i32> {
     let docs = load_slice_docs(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     let matches = find_matches(&docs, &manifest.docs, needle);
@@ -407,11 +445,15 @@ pub fn find(ctx: &Context, needle: &str, json: bool) -> Result<i32> {
         .max()
         .unwrap_or(0);
     for row in matches {
+        // slice_id keeps its id color; the needle is highlighted only in the
+        // description (no nested styles), so strip_ansi() round-trips cleanly.
+        let pad = " ".repeat(width.saturating_sub(row.slice_id.len()));
+        let labels = styles.paint(styles.label, &format!("[{}]", row.matches.join(",")));
         println!(
-            "{:<width$}  [{}]  {}",
-            row.slice_id,
-            row.matches.join(","),
-            row.description
+            "{}{pad}  {}  {}",
+            styles.paint(styles.id, row.slice_id),
+            labels,
+            styles.highlight(row.description, needle),
         );
     }
     Ok(0)
@@ -512,7 +554,7 @@ pub fn docs(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-pub fn stale_docs(ctx: &Context, json: bool) -> Result<i32> {
+pub fn stale_docs(ctx: &Context, json: bool, styles: &Styles) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let manifest = load_doc_manifest(ctx)?;
     let stale = stale_docs_for(ctx, &docs, &manifest.docs, StalenessMode::Attributed);
@@ -523,15 +565,16 @@ pub fn stale_docs(ctx: &Context, json: bool) -> Result<i32> {
         println!("all docs are up to date");
     } else {
         for doc in &stale {
+            let since = doc.verified_at.chars().take(12).collect::<String>();
             println!(
                 "{}  ({})  (since {})  [{}]",
-                doc.doc_id,
-                doc.path,
-                doc.verified_at.chars().take(12).collect::<String>(),
+                styles.paint(styles.stale, &doc.doc_id),
+                styles.paint(styles.dim, &doc.path),
+                since,
                 doc.affected_slices.join(", ")
             );
             for file in &doc.changed_files {
-                println!("  - {file}");
+                println!("  - {}", styles.paint(styles.dim, file));
             }
         }
     }
@@ -1286,28 +1329,48 @@ pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-fn print_list(label: &str, values: &[String]) {
+fn print_list_colored(
+    label: &str,
+    values: &[String],
+    styles: &Styles,
+    value_style: Option<anstyle::Style>,
+) {
+    let label = styles.paint(styles.dim, &format!("{label}:"));
     if values.is_empty() {
-        println!("{label}: (none)");
+        println!("{label} (none)");
     } else {
-        println!("{label}:");
+        println!("{label}");
         for value in values {
-            println!("  - {value}");
+            match value_style {
+                Some(style) => println!("  - {}", styles.paint(style, value)),
+                None => println!("  - {value}"),
+            }
         }
     }
 }
 
-fn print_tracked_docs(label: &str, values: &[&TrackedDoc]) {
+fn print_tracked_docs(
+    label: &str,
+    values: &[&TrackedDoc],
+    styles: &Styles,
+    stale_ids: &FxHashSet<String>,
+) {
+    let header = styles.paint(styles.dim, &format!("{label}:"));
     if values.is_empty() {
-        println!("{label}: (none)");
+        println!("{header} (none)");
     } else {
-        println!("{label}:");
+        println!("{header}");
         for value in values {
+            let verified = if stale_ids.contains(&value.doc_id) {
+                styles.paint(styles.stale, &value.verified_at)
+            } else {
+                value.verified_at.clone()
+            };
             println!(
                 "  - {{'doc_id': '{}', 'path': '{}', 'verified_at': '{}', 'tags': {}}}",
                 value.doc_id,
                 value.path,
-                value.verified_at,
+                verified,
                 python_list_repr(&value.tags)
             );
         }

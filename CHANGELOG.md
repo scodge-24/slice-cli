@@ -10,6 +10,11 @@ First public release.
 
 ### Features
 - Slice navigation: `list`, `show`, `files`, `deps`, `for`, `find`, `grep`.
+- **Terminal color** on human output (`list`/`show`/`find`/`stale-docs`), gated by a
+  global `--color=auto|always|never` flag. `auto` (the default) colors only when
+  stdout is a terminal and honors `NO_COLOR`; pipes and the `--json` path are never
+  colored, so terminal output now carries color by default while scripts and agents
+  see byte-identical plain text. `slice list` gains an at-a-glance `[N stale]` badge.
 - Doc-staleness tracking via a `DOCS.yaml` manifest, anchored on a **content
   fingerprint** of each doc's tracked files (rebase- and sequencing-safe);
   `verified_at` is kept as a human-readable HEAD note.

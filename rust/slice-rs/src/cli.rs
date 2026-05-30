@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use crate::Result;
 use crate::check::{CheckOptions, output as check_output, run as run_check};
+use crate::color::{ColorChoice, Styles};
 use crate::commands::{self, ShowMode};
 use crate::context::Context;
 use crate::index;
@@ -17,6 +18,10 @@ pub struct Args {
 
     #[arg(long, value_name = "DIR")]
     slices_dir: Option<PathBuf>,
+
+    /// When to colorize human output (never affects --json).
+    #[arg(long, global = true, default_value = "auto", value_name = "WHEN")]
+    color: ColorChoice,
 
     #[command(subcommand)]
     command: Command,
@@ -209,8 +214,9 @@ pub fn run() -> anyhow::Result<i32> {
 )]
 fn run_inner(args: Args) -> Result<i32> {
     let ctx = Context::new(args.repo, args.slices_dir)?;
+    let styles = Styles::resolve(args.color);
     match args.command {
-        Command::List { json } => commands::list(&ctx, json),
+        Command::List { json } => commands::list(&ctx, json, &styles),
         Command::Show {
             selector,
             body,
@@ -232,7 +238,7 @@ fn run_inner(args: Args) -> Result<i32> {
                     ));
                 }
             };
-            commands::show(&ctx, &selector, mode, json)
+            commands::show(&ctx, &selector, mode, json, &styles)
         }
         Command::Files { selector, json } => commands::files(&ctx, &selector, json),
         Command::Deps {
@@ -249,7 +255,7 @@ fn run_inner(args: Args) -> Result<i32> {
             best_effort,
             json,
         } => commands::context(&ctx, &selector, strict, best_effort, json),
-        Command::Find { needle, json } => commands::find(&ctx, &needle, json),
+        Command::Find { needle, json } => commands::find(&ctx, &needle, json, &styles),
         Command::Grep {
             selector,
             pattern,
@@ -257,7 +263,7 @@ fn run_inner(args: Args) -> Result<i32> {
             fixed_strings,
         } => commands::grep(&ctx, &selector, &pattern, ignore_case, fixed_strings),
         Command::Docs { selector, json } => commands::docs(&ctx, &selector, json),
-        Command::StaleDocs { json } => commands::stale_docs(&ctx, json),
+        Command::StaleDocs { json } => commands::stale_docs(&ctx, json, &styles),
         Command::Check {
             strict_index,
             no_staleness,

@@ -37,7 +37,7 @@ pub struct TrackedDoc {
 
 #[derive(Debug, Clone)]
 pub struct DocManifest {
-    pub vault_root_raw: Option<String>,
+    pub docs_root_raw: Option<String>,
     pub docs: Vec<TrackedDoc>,
 }
 

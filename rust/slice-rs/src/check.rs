@@ -206,9 +206,12 @@ fn verification_checks(
         for raw in &doc.abstractions {
             let name = normalize_abstraction(raw);
             if !name.is_empty() && !linked.contains(name.as_str()) {
-                result
-                    .warnings
-                    .push(format!("{doc_rel}: abstraction not verified: {name}"));
+                result.errors.push(format!(
+                    "{doc_rel}: abstraction not verified: {name} \
+                     - add `- `{name}` <- path/to/test::test_name` under ## Verification, \
+                     or drop {name} from `abstractions:` if untested \
+                     (see docs/verification-links.md)"
+                ));
             }
         }
     }
@@ -354,13 +357,13 @@ fn doc_manifest_checks(
     if manifest.docs.is_empty() {
         return Ok(());
     }
-    let vault_root = manifest
-        .vault_root_raw
+    let docs_root = manifest
+        .docs_root_raw
         .as_ref()
         .map(|raw| ctx.slices_dir().join(raw));
     for doc in &manifest.docs {
-        if let Some(vault_root) = &vault_root {
-            let path = vault_root.join(&doc.path);
+        if let Some(docs_root) = &docs_root {
+            let path = docs_root.join(&doc.path);
             if path.exists() {
                 match frontmatter_doc_id(&path) {
                     None => result.errors.push(format!(

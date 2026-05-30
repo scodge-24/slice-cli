@@ -11,7 +11,10 @@ use crate::index;
 use crate::init::{InitOptions, run as run_init};
 
 #[derive(Debug, Parser)]
-#[command(name = "slice-rs", about = "Rust prototype for slice-cli hot paths.")]
+#[command(
+    name = "slice",
+    about = "Navigate your codebase by slice: ownership, blast radius, call stacks, concepts, and doc staleness."
+)]
 pub struct Args {
     #[arg(long, value_name = "DIR")]
     repo: Option<PathBuf>,
@@ -182,9 +185,9 @@ enum Command {
         stamp_all: bool,
     },
 
-    /// Scan a vault directory and generate DOCS.yaml.
+    /// Scan a documentation directory and generate DOCS.yaml.
     DocsBootstrap {
-        vault_dir: PathBuf,
+        docs_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -196,7 +199,9 @@ enum Command {
     /// Examples:
     ///   slice init
     ///   slice init --hook --ci --agent
-    #[command(after_help = "Examples:\n  slice init\n  slice init --hook --ci --agent")]
+    #[command(
+        after_help = "Examples:\n  slice init\n  slice init --hook --ci --agent\n  slice init --docs docs"
+    )]
     Init {
         #[arg(long)]
         hook: bool,
@@ -208,6 +213,9 @@ enum Command {
         global_: bool,
         #[arg(long)]
         dry_run: bool,
+        /// Set up doc-staleness tracking: generate slices/DOCS.yaml from this docs directory.
+        #[arg(long, value_name = "DIR")]
+        docs: Option<PathBuf>,
     },
 }
 
@@ -341,24 +349,26 @@ fn run_inner(args: Args) -> Result<i32> {
             stamp_all,
         ),
         Command::DocsBootstrap {
-            vault_dir,
+            docs_dir,
             dry_run,
             force,
-        } => commands::docs_bootstrap(&ctx, &vault_dir, dry_run, force),
+        } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
         Command::Init {
             hook,
             ci,
             agent,
             global_,
             dry_run,
+            docs,
         } => run_init(
             &ctx,
-            InitOptions {
+            &InitOptions {
                 hook,
                 ci,
                 agent,
                 global: global_,
                 dry_run,
+                docs,
             },
         ),
     }

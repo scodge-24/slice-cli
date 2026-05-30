@@ -32,15 +32,28 @@ First public release.
   `Update Triggers`).
 - `slice show` section flags: `--body`, `--system`, `--call-stacks`,
   `--verification`.
+- `slice deps <id> --reverse --transitive` walks the full transitive blast
+  radius — every slice that depends on `<id>` directly or through intermediaries
+  — so you can see everything a change touches before you make it.
 - **V-model verification links** in the `## Verification` section: structured
   `abstraction <- test::name` traceability links plus an `upstream:` design-doc
   link. `slice check` validates them (dangling test/upstream refs are errors),
-  and `slice check --require-verification` warns on abstractions with no link
-  (opt-in coverage gap). Format: `docs/verification-links.md`.
+  and `slice check --require-verification` is an opt-in coverage **gate**: an
+  abstraction with no link is an error (non-zero exit) with a fix-hint message,
+  so the slice-generation skill can rely on it. Format:
+  `docs/verification-links.md` is the canonical card-syntax contract.
 - `slice affected-docs`, `slice stale-docs`, `slice stamp`, `slice check`,
   `slice sync-index`, `slice docs`, `slice docs-bootstrap`.
 - `slice init` — wire slice-cli into a repo (idempotent agent-instruction block
-  for CLAUDE.md/AGENTS.md, optional `--hook` and `--ci`).
+  for CLAUDE.md/AGENTS.md, optional `--hook` and `--ci`). `--docs <dir>` sets up
+  doc tracking: it bootstraps `DOCS.yaml` from docs whose frontmatter carries
+  `tracks:` and otherwise writes a commented stub seeded with the docs it found,
+  never clobbering an existing manifest.
+- The injected CLAUDE.md block, the `slice-codebase` skill, and the
+  `codebase-slicer` agent lead with navigation (ownership, blast radius, call
+  stacks, concepts); doc-staleness is one capability among them. Docs are
+  documentation-system-agnostic (no Obsidian assumption), and the `DOCS.yaml`
+  top-level key is `docs_root` (a legacy `vault_root` alias still loads).
 - `slices/config.yaml` with `context.ambiguity: strict | best_effort`.
 
 ### Slice generation (agent side)

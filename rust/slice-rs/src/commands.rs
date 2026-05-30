@@ -201,7 +201,12 @@ pub fn deps(
 ) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
-    let (dependencies, mode) = if reverse {
+    let (dependencies, mode) = if reverse && transitive {
+        (
+            transitive_reverse_deps(&doc.slice_id, &docs),
+            "reverse-transitive",
+        )
+    } else if reverse {
         (
             reverse_deps(&docs)
                 .remove(&doc.slice_id)
@@ -835,7 +840,7 @@ pub fn stamp(
     }
     save_doc_manifest(
         &crate::models::DocManifest {
-            vault_root_raw: manifest.vault_root_raw,
+            docs_root_raw: manifest.docs_root_raw,
             docs: updated,
         },
         ctx,
@@ -843,24 +848,24 @@ pub fn stamp(
     Ok(0)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "mirrors the small Python bootstrap command"
-)]
-pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: bool) -> Result<i32> {
-    let vault_dir = absolutize(vault_dir)?;
-    if !vault_dir.exists() {
-        eprintln!("vault directory not found: {}", vault_dir.display());
-        return Ok(2);
-    }
+struct DocsScan {
+    docs_root: String,
+    entries: BTreeMap<String, BootstrapEntry>,
+    unresolved: Vec<(String, String)>,
+    any_tracks: bool,
+}
 
+/// Scan a documentation directory: read each `.md` file's frontmatter and resolve its
+/// `tracks:` code paths to owning slice IDs. Shared by `docs-bootstrap` and `init --docs`.
+fn scan_docs_dir(ctx: &Context, docs_dir: &Path) -> Result<DocsScan> {
     let slices = load_slice_docs_meta(ctx)?;
-    let vault_root = relative_path(&vault_dir, ctx.slices_dir());
+    let docs_root = relative_path(docs_dir, ctx.slices_dir());
     let mut entries = BTreeMap::<String, BootstrapEntry>::new();
     let mut unresolved = Vec::<(String, String)>::new();
-    for md_file in markdown_files(&vault_dir)? {
+    let mut any_tracks = false;
+    for md_file in markdown_files(docs_dir)? {
         let rel_path = md_file
-            .strip_prefix(&vault_dir)
+            .strip_prefix(docs_dir)
             .unwrap_or(md_file.as_path())
             .to_string_lossy()
             .into_owned();
@@ -878,6 +883,7 @@ pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: boo
             });
         let mut slice_ids = Vec::new();
         for track in string_list(frontmatter.get("tracks")) {
+            any_tracks = true;
             if track.to_lowercase().ends_with(".md") {
                 continue;
             }
@@ -902,25 +908,16 @@ pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: boo
             },
         );
     }
+    Ok(DocsScan {
+        docs_root,
+        entries,
+        unresolved,
+        any_tracks,
+    })
+}
 
-    if entries.is_empty() {
-        eprintln!("no .md files found in vault");
-        return Ok(1);
-    }
-    if dry_run {
-        print_bootstrap_dry_run(&vault_root, &entries, &unresolved);
-        return Ok(0);
-    }
-    let manifest_path = ctx.docs_manifest_path();
-    if manifest_path.exists() && !force {
-        eprintln!(
-            "{} already exists - use --force to overwrite",
-            ctx.rel(&manifest_path)
-        );
-        return Ok(1);
-    }
-
-    let docs = entries
+fn scan_to_tracked_docs(entries: &BTreeMap<String, BootstrapEntry>) -> Vec<TrackedDoc> {
+    entries
         .iter()
         .map(|(doc_id, entry)| TrackedDoc {
             doc_id: doc_id.clone(),
@@ -932,38 +929,151 @@ pub fn docs_bootstrap(ctx: &Context, vault_dir: &Path, dry_run: bool, force: boo
             exclude: Vec::new(),
             fingerprint: String::new(),
         })
-        .collect();
-    save_doc_manifest(
-        &crate::models::DocManifest {
-            vault_root_raw: Some(vault_root),
-            docs,
-        },
-        ctx,
-    )?;
-    let mapped = entries
+        .collect()
+}
+
+fn print_bootstrap_summary(ctx: &Context, scan: &DocsScan) {
+    let mapped = scan
+        .entries
         .values()
         .filter(|entry| !entry.slices.is_empty())
         .count();
-    println!("wrote {}", ctx.rel(&manifest_path));
-    println!("  docs:                {}", entries.len());
+    println!("wrote {}", ctx.rel(&ctx.docs_manifest_path()));
+    println!("  docs:                {}", scan.entries.len());
     println!("  with slice mappings: {mapped}");
     println!(
-        "  without mappings:    {}  (stamp manually or add slices)",
-        entries.len() - mapped
+        "  without mappings:    {}  (add `tracks:` to the doc and re-run, or stamp manually)",
+        scan.entries.len() - mapped
     );
-    if !unresolved.is_empty() {
-        println!("  unresolved tracks:   {}", unresolved.len());
-        for (doc_id, track) in unresolved.iter().take(10) {
+    if !scan.unresolved.is_empty() {
+        println!("  unresolved tracks:   {}", scan.unresolved.len());
+        for (doc_id, track) in scan.unresolved.iter().take(10) {
             println!("    [{doc_id}] {track}");
         }
-        if unresolved.len() > 10 {
-            println!(
-                "    ... and {} more (re-run with --dry-run to see all)",
-                unresolved.len() - 10
-            );
+        if scan.unresolved.len() > 10 {
+            println!("    ... and {} more", scan.unresolved.len() - 10);
         }
     }
+}
+
+pub fn docs_bootstrap(ctx: &Context, docs_dir: &Path, dry_run: bool, force: bool) -> Result<i32> {
+    let docs_dir = absolutize(docs_dir)?;
+    if !docs_dir.exists() {
+        eprintln!("documentation directory not found: {}", docs_dir.display());
+        return Ok(2);
+    }
+    let scan = scan_docs_dir(ctx, &docs_dir)?;
+    if scan.entries.is_empty() {
+        eprintln!("no .md files found in documentation directory");
+        return Ok(1);
+    }
+    if dry_run {
+        print_bootstrap_dry_run(&scan.docs_root, &scan.entries, &scan.unresolved);
+        return Ok(0);
+    }
+    let manifest_path = ctx.docs_manifest_path();
+    if manifest_path.exists() && !force {
+        eprintln!(
+            "{} already exists - use --force to overwrite",
+            ctx.rel(&manifest_path)
+        );
+        return Ok(1);
+    }
+    save_doc_manifest(
+        &crate::models::DocManifest {
+            docs_root_raw: Some(scan.docs_root.clone()),
+            docs: scan_to_tracked_docs(&scan.entries),
+        },
+        ctx,
+    )?;
+    print_bootstrap_summary(ctx, &scan);
     Ok(0)
+}
+
+/// Set up `slices/DOCS.yaml` as part of `slice init --docs <dir>`. Bootstraps real
+/// doc→slice mappings when any doc carries `tracks:` frontmatter; otherwise writes a
+/// commented stub seeded with the docs it found. Never clobbers an existing manifest.
+/// Returns the exit code: 0 on success (manifest written, or one already exists),
+/// 2 when the docs directory is missing — so a typo'd `--docs` path fails loudly
+/// instead of silently leaving no manifest behind.
+pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool) -> Result<i32> {
+    let manifest_path = ctx.docs_manifest_path();
+    if manifest_path.exists() {
+        println!(
+            "{} already exists - leaving it (use `slice docs-bootstrap --force` to regenerate)",
+            ctx.rel(&manifest_path)
+        );
+        return Ok(0);
+    }
+    // Resolve a relative --docs path against the repo root, not the process CWD.
+    let docs_dir = if docs_dir.is_absolute() {
+        docs_dir.to_path_buf()
+    } else {
+        ctx.repo_root().join(docs_dir)
+    };
+    if !docs_dir.exists() {
+        eprintln!("documentation directory not found: {}", ctx.rel(&docs_dir));
+        return Ok(2);
+    }
+    if dry_run {
+        println!("would set up doc tracking at {}", ctx.rel(&manifest_path));
+        return Ok(0);
+    }
+    let scan = scan_docs_dir(ctx, &docs_dir)?;
+    if scan.any_tracks && !scan.entries.is_empty() {
+        save_doc_manifest(
+            &crate::models::DocManifest {
+                docs_root_raw: Some(scan.docs_root.clone()),
+                docs: scan_to_tracked_docs(&scan.entries),
+            },
+            ctx,
+        )?;
+        print_bootstrap_summary(ctx, &scan);
+        println!("Run `slice stamp --all` to record baseline fingerprints.");
+    } else {
+        write_docs_stub(ctx, &scan)?;
+        println!("wrote {} (stub)", ctx.rel(&manifest_path));
+        println!("  Add `tracks: [<code paths>]` to each doc's frontmatter, then re-run");
+        println!(
+            "  `slice init --docs {}` and `slice stamp --all`.",
+            ctx.rel(&docs_dir)
+        );
+    }
+    Ok(0)
+}
+
+/// Write a commented DOCS.yaml stub, seeded with any docs found, when nothing carries
+/// `tracks:` frontmatter yet. `save_doc_manifest` can't emit comments, so compose directly.
+fn write_docs_stub(ctx: &Context, scan: &DocsScan) -> Result<()> {
+    let mut content = String::new();
+    content.push_str("# slice doc-staleness tracking. To enable it:\n");
+    content.push_str(
+        "#   1. add `tracks: [<code paths a doc describes>]` to each doc's frontmatter\n",
+    );
+    content.push_str("#   2. re-run `slice init --docs <dir>` (or `slice docs-bootstrap <dir>`)\n");
+    content.push_str("#   3. `slice stamp --all` to record baselines\n");
+    content.push_str("docs_root: ");
+    content.push_str(&scan.docs_root);
+    content.push('\n');
+    content.push_str("docs:\n");
+    if scan.entries.is_empty() {
+        content.push_str("  # example-doc:\n");
+        content.push_str("  #   path: example-doc.md\n");
+        content.push_str("  #   slices: [some-slice-id]\n");
+    } else {
+        for (doc_id, entry) in &scan.entries {
+            content.push_str("  ");
+            content.push_str(doc_id);
+            content.push_str(":\n");
+            content.push_str("    path: ");
+            content.push_str(&entry.path);
+            content.push('\n');
+            content.push_str("    slices: []   # add the slice IDs this doc describes\n");
+            content.push_str("    verified_at: \"\"\n");
+        }
+    }
+    let path = ctx.docs_manifest_path();
+    std::fs::write(&path, content).map_err(|source| Error::Write { path, source })
 }
 
 fn stamp_targets(
@@ -1122,11 +1232,11 @@ fn relative_path(path: &Path, base: &Path) -> String {
 }
 
 fn print_bootstrap_dry_run(
-    vault_root: &str,
+    docs_root: &str,
     entries: &BTreeMap<String, BootstrapEntry>,
     unresolved: &[(String, String)],
 ) {
-    println!("vault_root: {vault_root}");
+    println!("docs_root: {docs_root}");
     println!("docs found: {}", entries.len());
     let mapped = entries
         .values()
@@ -1405,6 +1515,30 @@ fn reverse_deps(docs: &[SliceDoc]) -> FxHashMap<String, Vec<String>> {
         values.sort();
     }
     reverse
+}
+
+fn transitive_reverse_deps(start: &str, docs: &[SliceDoc]) -> Vec<String> {
+    let reverse = reverse_deps(docs);
+    let mut ordered = Vec::new();
+    let mut seen = FxHashSet::default();
+    // Seed with `start` so a dependency cycle can't list the slice itself as part
+    // of its own blast radius.
+    seen.insert(start.to_owned());
+    let mut queue = VecDeque::from(reverse.get(start).cloned().unwrap_or_default());
+    while let Some(current) = queue.pop_front() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        ordered.push(current.clone());
+        if let Some(next) = reverse.get(current.as_str()) {
+            for dep in next {
+                if !seen.contains(dep) {
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+    }
+    ordered
 }
 
 fn transitive_deps(start: &str, docs: &[SliceDoc]) -> Vec<String> {

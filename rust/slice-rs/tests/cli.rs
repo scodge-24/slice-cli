@@ -152,7 +152,7 @@ Auth behavior.
     .unwrap();
     std::fs::write(
         repo.join("slices/DOCS.yaml"),
-        r#"vault_root: ../docs
+        r#"docs_root: ../docs
 docs:
   auth-guide:
     path: auth-guide.md
@@ -478,7 +478,7 @@ fn native_check_json_reports_unknown_manifest_slice() {
     .unwrap();
     std::fs::write(
         repo.join("slices/DOCS.yaml"),
-        r"vault_root: ../docs
+        r"docs_root: ../docs
 docs:
   auth-guide:
     path: auth-guide.md
@@ -563,10 +563,61 @@ fn native_check_json_reports_required_verification() {
         "--require-verification",
     ];
     let result = run_rust_for_repo(repo, &args);
-    assert_eq!(result.0, 0);
-    assert!(result.1["warnings"].as_array().unwrap().iter().any(
-        |warning| warning == "slices/auth-service.md: abstraction not verified: create_session"
-    ));
+    assert_eq!(result.0, 1, "an unverified abstraction must fail the gate");
+    assert!(
+        result.1["errors"].as_array().unwrap().iter().any(|err| {
+            err.as_str()
+                .unwrap()
+                .contains("abstraction not verified: create_session")
+        }),
+        "error must name the unverified abstraction with a fix hint"
+    );
+}
+
+#[test]
+fn deps_reverse_transitive_walks_multiple_hops() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        std::fs::write(repo.join(format!("src/{name}.rs")), "// x\n").unwrap();
+    }
+    // Chain: c depends on b, b depends on a.
+    std::fs::write(
+        repo.join("slices/chain-a.md"),
+        "---\nslice_id: chain-a\ndescription: A\nfiles:\n  - src/chain_a.rs\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-b.md"),
+        "---\nslice_id: chain-b\ndescription: B\nfiles:\n  - src/chain_b.rs\ndependencies:\n  - chain-a\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-c.md"),
+        "---\nslice_id: chain-c\ndescription: C\nfiles:\n  - src/chain_c.rs\ndependencies:\n  - chain-b\n---\n",
+    )
+    .unwrap();
+
+    // Direct reverse of chain-a is only its immediate dependent, chain-b.
+    let direct = run_rust_for_repo(repo, &["deps", "chain-a", "--reverse", "--json"]);
+    assert_eq!(direct.0, 0);
+    assert_eq!(direct.1["dependencies"], json!(["chain-b"]));
+
+    // Reverse + transitive reaches chain-c through chain-b.
+    let trans = run_rust_for_repo(
+        repo,
+        &["deps", "chain-a", "--reverse", "--transitive", "--json"],
+    );
+    assert_eq!(trans.0, 0);
+    assert_eq!(trans.1["mode"], "reverse-transitive");
+    let mut deps = trans.1["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    deps.sort();
+    assert_eq!(deps, vec!["chain-b".to_string(), "chain-c".to_string()]);
 }
 
 #[test]
@@ -978,7 +1029,124 @@ fn init_help_includes_examples() {
     let help = run_rust_raw(&["init", "-h"]);
     assert_eq!(help.0, 0);
     assert!(stdout_text(&help).contains("--agent"));
+    assert!(stdout_text(&help).contains("--docs"));
     assert!(stdout_text(&help).contains("Examples"));
+}
+
+#[test]
+fn init_docs_bootstraps_when_tracks_present() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    // auth-service owns src/auth/middleware.py, so this `tracks:` resolves to it.
+    std::fs::write(
+        repo.join("docs/auth-guide.md"),
+        "---\ndoc_id: auth-guide\ntracks:\n  - src/auth/middleware.py\n---\n# Auth Guide\n",
+    )
+    .unwrap();
+    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
+    assert_eq!(result.0, 0, "{}", stderr_text(&result));
+    let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    assert!(manifest.contains("docs_root: ../docs"), "{manifest}");
+    assert!(
+        manifest.contains("auth-guide:") && manifest.contains("auth-service"),
+        "auth-guide should map to auth-service: {manifest}"
+    );
+    assert!(
+        !manifest.contains("# slice doc-staleness"),
+        "tracks present → real bootstrap, not a stub: {manifest}"
+    );
+}
+
+#[test]
+fn init_docs_writes_commented_stub_when_no_tracks() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    // fixture's docs/auth-guide.md has a doc_id but no `tracks:` frontmatter.
+    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
+    assert_eq!(result.0, 0, "{}", stderr_text(&result));
+    let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    assert!(manifest.contains("docs_root: ../docs"), "{manifest}");
+    assert!(
+        manifest.contains("# slice doc-staleness tracking"),
+        "no tracks → commented stub: {manifest}"
+    );
+    assert!(
+        manifest.contains("auth-guide:") && manifest.contains("slices: []"),
+        "stub is seeded with the found doc and empty slices: {manifest}"
+    );
+    // The stub must still parse through the manifest reader (a YAML error would exit 2).
+    let docs = run_rust_raw_for_repo(repo, &["docs", "auth-service", "--json"]);
+    assert_eq!(
+        docs.0,
+        0,
+        "stub manifest should load: {}",
+        stderr_text(&docs)
+    );
+}
+
+#[test]
+fn init_docs_leaves_existing_manifest_untouched() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    let before = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
+    assert_eq!(result.0, 0);
+    assert!(stdout_text(&result).contains("already exists"));
+    let after = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    assert_eq!(before, after, "existing DOCS.yaml must not be clobbered");
+}
+
+#[test]
+fn init_docs_missing_dir_fails_loudly() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
+    // A typo'd / moved docs dir must exit non-zero, not silently succeed with no manifest.
+    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "nope-not-here"]);
+    assert_eq!(
+        result.0,
+        2,
+        "missing docs dir must fail: {}",
+        stderr_text(&result)
+    );
+    assert!(stderr_text(&result).contains("not found"));
+    assert!(
+        !repo.join("slices/DOCS.yaml").exists(),
+        "no manifest should be written when the docs dir is missing"
+    );
+}
+
+#[test]
+fn deps_reverse_transitive_excludes_self_on_cycle() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    for name in ["cyc_a", "cyc_b"] {
+        std::fs::write(repo.join(format!("src/{name}.rs")), "// x\n").unwrap();
+    }
+    // cyc-a <-> cyc-b mutual dependency.
+    std::fs::write(
+        repo.join("slices/cyc-a.md"),
+        "---\nslice_id: cyc-a\ndescription: A\nfiles:\n  - src/cyc_a.rs\ndependencies:\n  - cyc-b\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/cyc-b.md"),
+        "---\nslice_id: cyc-b\ndescription: B\nfiles:\n  - src/cyc_b.rs\ndependencies:\n  - cyc-a\n---\n",
+    )
+    .unwrap();
+    let trans = run_rust_for_repo(
+        repo,
+        &["deps", "cyc-a", "--reverse", "--transitive", "--json"],
+    );
+    assert_eq!(trans.0, 0);
+    let deps = trans.1["dependencies"].as_array().unwrap();
+    assert!(deps.iter().any(|value| value == "cyc-b"));
+    assert!(
+        !deps.iter().any(|value| value == "cyc-a"),
+        "blast radius must not include the start slice itself: {deps:?}"
+    );
 }
 
 #[test]

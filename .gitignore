@@ -1,10 +1,9 @@
+# Python bytecode from the examples/mock-repo sample data
 __pycache__/
 *.pyc
-.pytest_cache/
+
 trash/
 .turbo/
-.coverage
-htmlcov/
 .gstack/
 target/
 rust/slice-rs/target/

@@ -4,54 +4,47 @@ CLI tool for navigating codebase slice documents with doc-staleness tracking. Tu
 
 ## Layout
 
-- `rust/slice-rs/` — **the shipped CLI** (Rust). The `slice` binary builds from
-  `src/main.rs`; logic lives in `src/` (one module per concern, mirroring the
-  Python oracle). This is the version we develop against going forward.
-- `slice_cli/` — Python implementation, now the **parity test oracle** only
-  (`rust/slice-rs/tests/parity.rs` shells out to `python -m slice_cli`). Being
-  phased out per `design/rust-gap-closure-plan.md`; do not add features here.
-- `slices_cli_upstream.py` — upstream reference (read-only, do not edit)
-- pytest suite (`test_slices_cli.py`) — the oracle's test net; the source of the
-  expected behavior the Rust suite must match
+- `rust/slice-rs/` — the CLI (Rust). The `slice` binary builds from `src/main.rs`;
+  logic lives in `src/`, one module per concern. Tests are native Rust
+  (`tests/cli.rs` + module `#[cfg(test)]` units) and build throwaway git repos in
+  tmp dirs.
 - `examples/mock-repo/` — a self-contained demo repo the CLI runs against (`src/` mock code, `slices/` definitions + `DOCS.yaml`, `docs/` tracked docs). Run it with `slice --repo examples/mock-repo <cmd>`. This is sample data, NOT documentation about the tool.
-- `design/` — design docs (architecture, schema, workflows, plans)
+- `design/` — design docs (architecture, schema, workflows, plans) incl. the
+  Python→Rust migration history.
 - `docs/` — reserved for real tool documentation (user-facing docs about slice-cli itself)
+
+slice-cli was originally written in Python and ported to Rust; the Python
+implementation is preserved at tag `python-impl-final` / branch `package-refactor`.
 
 ## Dev
 
 - Rust (toolchain pinned in `rust/slice-rs/rust-toolchain.toml`); `git` on PATH
   at runtime.
 - Build/run: `cargo run --manifest-path rust/slice-rs/Cargo.toml -- <args>`.
-  Install: `cargo install --path rust/slice-rs` (produces `slice`).
-- Tests: `cargo test --manifest-path rust/slice-rs/Cargo.toml` (parity tests need
-  the Python oracle: `pip install -e ".[dev]"` so `python -m slice_cli` resolves).
-- Oracle suite: `pytest`.
+- Install: `cargo install --path rust/slice-rs` (produces `slice`).
+- Tests: `cargo test --manifest-path rust/slice-rs/Cargo.toml`.
+- Lint: `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`.
 
 ## Conventions
 
-- `slices_cli_upstream.py` is the reference implementation — do not modify it. Compare against it when checking divergence.
 - `DOCS.yaml` is the single source of truth for doc-to-slice mapping and staleness. Staleness is anchored on a content `fingerprint` of each doc's tracked files (recorded by `slice stamp`); `verified_at` is a human-readable HEAD note. Legacy entries without a fingerprint fall back to git SHA-diff. Docs and slice files stay clean of tracking metadata.
 - Keep changes focused in the module that owns the concern.
+- The embedded `slice init` templates must stay byte-identical to the committed
+  `skills/slice-codebase/SKILL.md` and `agents/codebase-slicer.md` (guarded by the
+  `embedded_templates_match_committed_files` test).
 
 ## Module map
 
-The Rust CLI mirrors these concerns one-to-one in `rust/slice-rs/src/`
-(`check.rs`, `commands.rs`, `context.rs`, `paths.rs`, `index.rs`, `init.rs`,
-`slices.rs`, `manifest.rs`, `git_backend.rs`, `cli.rs`). The table below maps the
-Python oracle:
-
-| I want to change... | Look in |
-|---------------------|---------|
-| repo / git / path discovery | `slice_cli/context.py` |
-| path normalization helpers | `slice_cli/paths.py` |
-| content + source fingerprinting | `slice_cli/fingerprint.py` |
-| index parse/generate | `slice_cli/index.py` |
-| load/save slices + manifest | `slice_cli/persistence.py` |
-| doc drift detection | `slice_cli/drift.py` |
-| validation (`slice check`) | `slice_cli/check.py` |
-| command handlers (`cmd_*`) | `slice_cli/commands.py` |
-| human + JSON rendering | `slice_cli/render.py` |
-| `slice docs bootstrap` | `slice_cli/bootstrap.py` |
-| `slice init` + templates | `slice_cli/init.py` |
-| argparse wiring + `main()` | `slice_cli/cli.py` |
-| `python -m slice_cli` entry | `slice_cli/__main__.py` |
+| I want to change... | Look in (`rust/slice-rs/src/`) |
+|---------------------|--------------------------------|
+| repo / git / path discovery | `context.rs`, `git_backend.rs` |
+| path normalization + globs | `paths.rs` |
+| slice parsing + fingerprinting | `slices.rs`, `index.rs` |
+| doc manifest load/save | `manifest.rs` |
+| command handlers (list/show/stale/affected/stamp/…) | `commands.rs` |
+| validation (`slice check`) + verification links | `check.rs` |
+| `slice init` + embedded templates | `init.rs` |
+| config (context ambiguity) | `config.rs` |
+| CLI wiring / arg parsing | `cli.rs` |
+| data types | `models.rs` |
+| errors / exit codes | `error.rs`, `main.rs` |

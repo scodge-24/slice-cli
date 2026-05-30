@@ -56,9 +56,9 @@ First public release.
 - The shipped `slice` command is now a self-contained **Rust binary**
   (`rust/slice-rs`), installable as a prebuilt binary from GitHub Releases or via
   `cargo install --path rust/slice-rs`.
-- The Python implementation (`slice_cli`) is retained as the parity test
-  **oracle** (run as `python -m slice_cli`) and will be removed once the Rust
-  suite is self-sufficient; it no longer installs a `slice` console script.
+- The Python implementation has been fully removed from the tree once the Rust
+  suite reached native parity (50 tests, no oracle). It remains recoverable at
+  tag `python-impl-final` and branch `package-refactor`.
 - BREAKING: there is no longer a Python `slice` console script. Install the Rust
   binary instead. (The earlier single-file `slices_cli` module and root-script
   path were already removed in the package refactor.)

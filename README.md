@@ -32,10 +32,9 @@ From a checkout you can also run it without installing:
 cargo run --manifest-path rust/slice-rs/Cargo.toml -- --repo examples/mock-repo list --json
 ```
 
-> A Python implementation lives in `slice_cli/`. It is no longer the shipped CLI
-> — it is retained as the parity test **oracle** (run as `python -m slice_cli`)
-> and will be removed once the Rust test suite is self-sufficient. See
-> [`design/rust-gap-closure-plan.md`](design/rust-gap-closure-plan.md).
+> slice-cli began as a Python tool and was ported to Rust; the migration history
+> lives in [`design/`](design/). The Python implementation is preserved at tag
+> `python-impl-final` and branch `package-refactor`.
 
 ## 60-second tour
 

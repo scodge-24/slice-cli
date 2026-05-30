@@ -517,18 +517,25 @@ fn selected_slice_id(line: &str) -> &str {
 
 /// Wrap `cmd` in an fzf action delimiter that does not occur in `cmd`, so a path
 /// containing `)` can't prematurely close a `change-preview(...)` action.
-fn fzf_action(action: &str, cmd: &str) -> String {
+///
+/// Refuses (rather than emitting a known-broken `(...)` action) when `cmd` contains
+/// every candidate delimiter — only reachable with a pathological repo path holding all
+/// of `()[]<>~!@#%^|`. fzf's bind grammar has no escape for the active delimiter, so a
+/// broken bind is the only alternative.
+fn fzf_action(action: &str, cmd: &str) -> Result<String> {
     for (open, close) in [('(', ')'), ('[', ']'), ('<', '>')] {
         if !cmd.contains(open) && !cmd.contains(close) {
-            return format!("{action}{open}{cmd}{close}");
+            return Ok(format!("{action}{open}{cmd}{close}"));
         }
     }
     for delim in ['~', '!', '@', '#', '%', '^', '|'] {
         if !cmd.contains(delim) {
-            return format!("{action}{delim}{cmd}{delim}");
+            return Ok(format!("{action}{delim}{cmd}{delim}"));
         }
     }
-    format!("{action}({cmd})")
+    Err(Error::InvalidInput(format!(
+        "repo path contains every fzf action delimiter; cannot build a `{action}` bind"
+    )))
 }
 
 pub fn browse(
@@ -569,7 +576,9 @@ pub fn browse(
     let q_exe = shell_quote(&exe.to_string_lossy());
     let q_repo = shell_quote(&ctx.repo_root().to_string_lossy());
     let base = format!("{q_exe} --repo {q_repo} --color={preview_color}");
-    let preview = format!("{base} show {{1}}");
+    // `--` precedes the `{1}` slice id so an id starting with `-` is read as a positional
+    // selector, not a clap flag; trailing flags stay before the `--`.
+    let preview = format!("{base} show -- {{1}}");
 
     // Lenses onto a slice's three content layers. The keys avoid fzf's default
     // line-editing binds (ctrl-u=clear-query etc.); files/direct-deps are already in
@@ -583,22 +592,22 @@ pub fn browse(
         .arg("--bind")
         .arg(format!(
             "ctrl-o:{}",
-            fzf_action("change-preview", &format!("{base} show {{1}}"))
+            fzf_action("change-preview", &format!("{base} show -- {{1}}"))?
         ))
         .arg("--bind")
         .arg(format!(
             "ctrl-r:{}",
-            fzf_action("change-preview", &format!("{base} show {{1}} --call-stacks"))
+            fzf_action("change-preview", &format!("{base} show --call-stacks -- {{1}}"))?
         ))
         .arg("--bind")
         .arg(format!(
             "ctrl-d:{}",
-            fzf_action("change-preview", &format!("{base} show {{1}} --verification"))
+            fzf_action("change-preview", &format!("{base} show --verification -- {{1}}"))?
         ))
         .arg("--bind")
         .arg(format!(
             "ctrl-t:{}",
-            fzf_action("change-preview", &format!("{base} deps {{1}} --reverse"))
+            fzf_action("change-preview", &format!("{base} deps --reverse -- {{1}}"))?
         ))
         .arg("--header")
         .arg("enter: show | ^o overview | ^r runtime | ^d verify | ^t used-by | ^/ pane | esc: cancel")
@@ -625,7 +634,22 @@ pub fn browse(
     let output = child.wait_with_output()?;
     let _ = writer.join();
 
-    let code = output.status.code().unwrap_or(1);
+    let code = match output.status.code() {
+        Some(code) => code,
+        // No exit code means fzf was killed by a signal; report 128 + signal (shell
+        // convention) so a crash isn't silently indistinguishable from "no match".
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                output.status.signal().map_or(1, |sig| 128 + sig)
+            }
+            #[cfg(not(unix))]
+            {
+                1
+            }
+        }
+    };
     if code != 0 {
         // 1 = no match, 130 = cancelled. Nothing selected.
         return Ok(code);
@@ -1654,13 +1678,15 @@ mod tests {
     fn fzf_action_avoids_delimiter_collisions() {
         // No parens in the command → use the default ().
         assert_eq!(
-            fzf_action("change-preview", "slice show {1}"),
+            fzf_action("change-preview", "slice show {1}").unwrap(),
             "change-preview(slice show {1})"
         );
         // A ')' in the command forces a different delimiter than ().
-        let with_paren = fzf_action("change-preview", "'/p)(q' show {1}");
+        let with_paren = fzf_action("change-preview", "'/p)(q' show {1}").unwrap();
         assert!(!with_paren.starts_with("change-preview("));
         assert!(with_paren.starts_with("change-preview"));
+        // Every candidate delimiter present → refuse rather than emit a broken bind.
+        assert!(fzf_action("change-preview", "()[]<>~!@#%^|").is_err());
     }
 
     #[test]

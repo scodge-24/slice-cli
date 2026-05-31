@@ -22,9 +22,10 @@ You need a Rust toolchain (pinned in `rust/slice-rs/rust-toolchain.toml`) and
   JSON output, inline strings for human/error output) — no external oracle.
 - **Lints stay clean.** `cargo fmt --check` and `cargo clippy --all-targets -- -D
   warnings` run in CI.
-- **Embedded templates stay in sync.** The `slice init` template constants must be
-  byte-identical to `skills/slice-codebase/SKILL.md` and
-  `agents/codebase-slicer.md` (guarded by `embedded_templates_match_committed_files`).
+- **The CLI writes only slice-owned state.** `slice docs-bootstrap` may write
+  `slices/DOCS.yaml`; `sync-index` writes its index. Agent instructions, git hooks,
+  CI workflows, and `.claude/` files are repo-owner policy — never written by the
+  binary. That setup lives in `docs/setup.md` for an agent to apply with consent.
 - **Staleness is fingerprint-anchored.** `slice stamp` records a content hash of
   a doc's tracked files; `verified_at` is a human note. See
   `docs/manifest-schema.md`.
@@ -50,7 +51,6 @@ Run these green, describe what changed and why, and link any related issue.
 | doc manifest load/save | `manifest.rs` |
 | command handlers (list/show/stale/affected/stamp/…) | `commands.rs` |
 | validation (`slice check`) + verification links | `check.rs` |
-| `slice init` + embedded templates | `init.rs` |
 | config (context ambiguity) | `config.rs` |
 | CLI wiring / arg parsing | `cli.rs` |
 | data types | `models.rs` |

@@ -96,7 +96,7 @@ stamped auth-guide -> 5fb503f...
 | `slice list` / `show` / `for` / `find` / `deps` | Navigate slices |
 | `slice browse` | Fuzzy-pick a slice with fzf, preview it inline (needs `fzf`) |
 | `slice check` | Integrity, staleness, and verification-link checks (`--require-verification` for V-model coverage) |
-| `slice init` | Wire `slice` into your repo (agent instructions, optional hook/CI) |
+| `slice docs-bootstrap <dir>` | Set up `DOCS.yaml` doc-staleness tracking from a docs directory |
 
 Run `slice <command> -h` for examples and flags.
 
@@ -117,26 +117,22 @@ For machine consumption use `slice list --json`, not `browse`.
 
 ## Use it in your own repo
 
-```bash
-slice init            # writes agent instructions into CLAUDE.md / AGENTS.md
-slice init --hook     # + a pre-commit staleness reminder
-slice init --ci       # + a GitHub Actions staleness check
-```
-
-`slice init` is idempotent and re-runnable. Generate slice files under `slices/` with
-`/slice-codebase` (or write them by hand).
-
-To also track design-doc staleness, set up `DOCS.yaml` (optional):
+Generate slice files under `slices/` with `/slice-codebase` (or write them by hand),
+then optionally track design-doc staleness with a `DOCS.yaml` manifest:
 
 ```bash
-slice init --docs docs   # generate slices/DOCS.yaml from your docs directory
-slice stamp --all        # record baseline fingerprints once mappings look right
+slice docs-bootstrap docs   # generate slices/DOCS.yaml from your docs directory
+slice stamp --all           # record baseline fingerprints once mappings look right
 ```
 
-`slice init --docs` bootstraps real doc→slice mappings from docs whose frontmatter
+`slice docs-bootstrap` builds real doc→slice mappings from docs whose frontmatter
 carries `tracks: [<code paths a doc describes>]`, and writes a commented stub seeded
-with the docs it found otherwise (add `tracks:` and re-run). See
-[`docs/`](docs/) for architecture, the manifest schema, and agent workflows.
+with the docs it found otherwise (add `tracks:` and re-run with `--force`).
+
+`slice` never edits repo policy for you — agent instructions, git hooks, and CI
+workflows are yours to own. For an agent-run setup that wires those up with your
+consent, see **[`docs/setup.md`](docs/setup.md)**. The rest of [`docs/`](docs/) covers
+architecture, the manifest schema, and agent workflows.
 
 ## Generating slices with an agent
 
@@ -153,18 +149,15 @@ claude plugin install slice-cli@slice-cli
 # install the `slice` binary (see Install above) so the skill finds it on PATH
 ```
 
-**Or bootstrap it from the CLI (no plugin system):**
+**Or install it manually (no plugin system):**
 
-```bash
-slice init --agent --global      # writes the skill + agent into ~/.claude
-```
-
-`--global` makes slicing available in every repo on the machine; drop it to
-install into the current repo's `.claude/` only. Either way, then run
-`/slice-codebase` in the repo you want sliced. Generation needs an LSP-capable
-environment (the agent uses LSP to map call graphs). Generated slices carry
-call-stack mapping (`## Runtime Flows`) and V-model verification links
-(`## Verification`, validated by `slice check`) by default — see
+Copy `skills/slice-codebase/` and `agents/codebase-slicer.md` from this repo into
+`~/.claude/` (every repo on the machine) or a repo's own `.claude/` (that repo only),
+then run `/slice-codebase` in the repo you want sliced.
+[`docs/setup.md`](docs/setup.md) walks an agent through this with your consent.
+Generation needs an LSP-capable environment (the agent uses LSP to map call graphs).
+Generated slices carry call-stack mapping (`## Runtime Flows`) and V-model
+verification links (`## Verification`, validated by `slice check`) by default — see
 [`docs/verification-links.md`](docs/verification-links.md).
 
 ## Docs

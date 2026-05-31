@@ -150,8 +150,8 @@ the manifest — created dual-write drift between docs and `DOCS.yaml`.
 **Decision**: `DOCS.yaml` is the single runtime source of the doc→slice mapping. Doc
 frontmatter carries content-oriented metadata (`doc_id`, `title`, `kind`, `status`, `tags`,
 `summary`) and no slice IDs. The one exception is an optional **`tracks:` list of code
-paths**, which is a *write-once bootstrap seed*: `slice init --docs` and `slice
-docs-bootstrap` read it once to resolve each doc's owning slices into `DOCS.yaml`. It is not
+paths**, which is a *write-once bootstrap seed*: `slice docs-bootstrap` reads it once to
+resolve each doc's owning slices into `DOCS.yaml`. It is not
 a runtime source — once the manifest exists, `DOCS.yaml` owns the mapping and `tracks:` is
 ignored.
 

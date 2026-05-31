@@ -8,7 +8,6 @@ use crate::color::{ColorChoice, Styles};
 use crate::commands::{self, ShowMode};
 use crate::context::Context;
 use crate::index;
-use crate::init::{InitOptions, run as run_init};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -186,36 +185,18 @@ enum Command {
     },
 
     /// Scan a documentation directory and generate DOCS.yaml.
+    ///
+    /// Bootstraps doc→slice mappings from docs whose frontmatter carries
+    /// `tracks:`, or writes a commented stub seeded with the docs it finds.
+    #[command(
+        after_help = "Examples:\n  slice docs-bootstrap docs\n  slice docs-bootstrap docs --force"
+    )]
     DocsBootstrap {
         docs_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
         force: bool,
-    },
-
-    /// Wire slice-cli into this repo.
-    ///
-    /// Examples:
-    ///   slice init
-    ///   slice init --hook --ci --agent
-    #[command(
-        after_help = "Examples:\n  slice init\n  slice init --hook --ci --agent\n  slice init --docs docs"
-    )]
-    Init {
-        #[arg(long)]
-        hook: bool,
-        #[arg(long)]
-        ci: bool,
-        #[arg(long)]
-        agent: bool,
-        #[arg(long = "global")]
-        global_: bool,
-        #[arg(long)]
-        dry_run: bool,
-        /// Set up doc-staleness tracking: generate slices/DOCS.yaml from this docs directory.
-        #[arg(long, value_name = "DIR")]
-        docs: Option<PathBuf>,
     },
 }
 
@@ -353,23 +334,5 @@ fn run_inner(args: Args) -> Result<i32> {
             dry_run,
             force,
         } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
-        Command::Init {
-            hook,
-            ci,
-            agent,
-            global_,
-            dry_run,
-            docs,
-        } => run_init(
-            &ctx,
-            &InitOptions {
-                hook,
-                ci,
-                agent,
-                global: global_,
-                dry_run,
-                docs,
-            },
-        ),
     }
 }

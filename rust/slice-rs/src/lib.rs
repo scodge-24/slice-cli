@@ -9,7 +9,6 @@ pub mod context;
 pub mod error;
 pub mod git_backend;
 pub mod index;
-pub mod init;
 pub mod manifest;
 pub mod models;
 pub mod paths;

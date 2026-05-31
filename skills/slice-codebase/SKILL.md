@@ -20,7 +20,7 @@ generation quality matters: a thin or malformed card is a thin answer to every l
 
 **Subagent type.** The scan agent is referenced below as `slice-cli:codebase-slicer` (its name when installed via the slice-cli plugin). If slicing was bootstrapped with `slice init --agent` instead, the agent is installed loose as plain `codebase-slicer` — use that name.
 
-If `$ARGUMENTS` contains file or directory paths (e.g., `/slice-codebase src/auth/ src/models/user.rs`), treat them as **scope hints** — the scout's starting search radius. Scope hints narrow where scanning begins but do not cap the result: the scout must still expand outward to include files outside the hints when dependencies cross the boundary.
+If `$ARGUMENTS` contains file or directory paths (e.g., `/slice-codebase src/auth/ src/models/user.rs`), treat them as **scope hints** — the scout's starting search radius. Scope hints narrow where scanning begins without capping the result: the scout still expands outward to include files outside the hints when dependencies cross the boundary.
 
 ## Check First
 
@@ -31,10 +31,11 @@ If `$ARGUMENTS` contains file or directory paths (e.g., `/slice-codebase src/aut
   - **exit 0** — slices are in sync with the code. Report "slices up to date" and stop.
   - **exit 1, INDEX.md present** — code drifted: run [Diff Slice Update](#diff-slice-update).
   - **exit 1, no INDEX.md** (slice files exist but the index was deleted): run
-    [Full Slice Generation](#full-slice-generation) — do not attempt a diff update with no base.
+    [Full Slice Generation](#full-slice-generation) — run a full generation, since a diff
+    update has no base to work from.
 
-Do not compare git commit hashes by hand; staleness is fingerprint-based and
-`slice sync-index --check` is the source of truth.
+Trust `slice sync-index --check` as the source of truth for staleness — it is fingerprint-based,
+so rely on it rather than comparing git commit hashes by hand.
 
 ---
 
@@ -51,20 +52,20 @@ Spawn exactly ONE `slice-cli:codebase-slicer` agent. The scout returns candidate
 ```
 Agent call:
   subagent_type: "slice-cli:codebase-slicer"
-  prompt: "Scout mode. Scan this repo and return candidate slice boundaries. For each candidate return: id, one-line description, estimated LoC, file list, and entry point files. Source code only — ignore docs/, specs/, *.md, README, config files, and non-source files. Do NOT read file contents in depth. You may use LSP workspaceSymbol for a fast symbol overview, but do NOT trace call hierarchies (incomingCalls/outgoingCalls) — that is Phase 2 work. Directory structure, file counts, and top-level symbols only."
+  prompt: "Scout mode. Scan this repo and return candidate slice boundaries. For each candidate return: id, one-line description, estimated LoC, file list, and entry point files. Map source code only — treat docs/, specs/, *.md, README, config files, and non-source files as out of scope. Keep each whole file in exactly one candidate (files are atomic; a file too large for the target stays one slice). Work from directory structure, file counts, and top-level symbols; you may use LSP workspaceSymbol for a fast symbol overview, and leave call-hierarchy tracing (incomingCalls/outgoingCalls) and in-depth file reads to Phase 2."
 ```
 
 <important if="scope hints were provided in $ARGUMENTS">
 Append to the scout prompt: "Start your scan from these paths as the search origin: <scope hints>. Expand to related files and modules outside these paths when dependencies cross the boundary."
 </important>
 
-Wait for results. Review the candidate list for obvious issues (overlapping files, missing areas). Do NOT launch Phase 2 until scout results are in hand.
+Wait for results. Review the candidate list for overlapping files, missing areas, and any candidate that splits a single file across slices — merge those into one slice, since files are atomic. Launch Phase 2 once the scout's candidates are in hand.
 
 ### Phase 2 — Refine (parallel agents)
 
 Create the `slices/` directory first. Spawn one `slice-cli:codebase-slicer` agent **per candidate** from Phase 1, all in parallel (single message, multiple Agent calls).
 
-Include the full candidate ID list in every refine prompt so agents can map cross-slice dependencies correctly.
+Include the full candidate **id→files map** in every refine prompt (every candidate's id and the files it owns) so each agent can resolve a callee file to its owning slice ID and orient dependencies correctly.
 
 ```
 Agent call (one per candidate, all launched in parallel):
@@ -73,8 +74,8 @@ Agent call (one per candidate, all launched in parallel):
     - candidate-id: <id>
     - files: <file list>
     - entry_points: <entry points>
-    - all candidate IDs: <full list from scout>
-    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, entry points, and cross-slice dependencies. Write the slice file directly, including the mandatory body sections: ## Runtime Flows (call-stack chains from outgoingCalls), ## Verification (V-model links — for each abstraction, incomingCalls filtered to test files, written as `abstraction <- testpath::testname`, plus an optional `upstream:` design-doc link), and ## Update Triggers. The verification-link format and test-file heuristic are in the codebase-slicer agent definition."
+    - slice map (id → files for every candidate): <id1>=[file, file]; <id2>=[file]; ...
+    Use LSP (documentSymbol, outgoingCalls, incomingCalls) to map exports, abstractions, and entry points. Set `dependencies:` to the slices this slice calls INTO (callees from outgoingCalls), resolving each callee file to its owning slice ID via the slice map; reserve `external:` for files in no candidate slice; write `dependencies: []` for a leaf. Name one symbol per abstraction. Write the slice file directly, including the mandatory body sections: ## Runtime Flows (call-stack chains from outgoingCalls), ## Verification (V-model links — for each abstraction, incomingCalls filtered to test files, written as `abstraction <- testpath::testname`, plus an optional `upstream:` design-doc link), and ## Update Triggers. The verification-link format, dependency-direction rule, and test-file heuristic are in the codebase-slicer agent definition."
 ```
 
 Wait for ALL refine agents to complete before Phase 3.
@@ -90,16 +91,26 @@ Wait for ALL refine agents to complete before Phase 3.
    - **Pass**: proceed.
    - **Fail**: read the error output, fix the offending slice files, re-run until it passes.
      Common fixes: resolve overlapping file assignments (assign to the slice with stronger
-     coupling), fix dangling dependency references, correct file paths, and add the missing
-     `` - `abstraction` <- test `` line each "abstraction not verified" error names (or drop
-     the abstraction if it is genuinely untested).
+     coupling); merge any single file split across two slices into one slice; fix dangling
+     dependency references; correct file paths; and add the missing `` - `abstraction` <- test ``
+     line each "abstraction not verified" error names (or drop the abstraction if it is
+     genuinely untested).
 
-2. **Self-review each card against the canonical syntax** before finishing (the full
-   grammar is in the `codebase-slicer` agent definition installed alongside this skill):
-   - sections use `## ` + a single space, with the exact names the CLI surfaces;
-   - `## Runtime Flows` uses ASCII ` -> `, one flow per line;
-   - `## Verification` links read `` - `abstraction` <- path::sym `` with a literal ` <- `;
-   - every abstraction appears in `## Verification`; no empty/placeholder sections.
+2. **Self-review each card** before finishing (the full grammar is in the `codebase-slicer`
+   agent definition installed alongside this skill). `slice check` gates file overlap and
+   verification links, but it does **not** check dependency *direction* — so verify that
+   yourself:
+   - **Dependency direction — run for every slice.** `slice deps <id>` lists this slice's
+     forward dependencies; confirm each one is a slice the card actually calls into (it appears
+     as a callee in that card's `## Runtime Flows`). Leaf/utility slices show empty or minimal
+     forward deps. Spot-check the inverse with `slice deps <id> --reverse` (which lists callers,
+     not callees). This self-review is the only safety net for direction — `slice check` will
+     pass a reversed edge.
+   - Sections use `## ` + a single space, with the exact names the CLI surfaces.
+   - `## Runtime Flows` uses ASCII ` -> `, one flow per line.
+   - `## Verification` links read `` - `abstraction` <- path::sym `` with a literal ` <- `, and
+     each abstraction names a single symbol matching its link.
+   - Every abstraction appears in `## Verification`; every section carries grounded content.
 
 3. **Generate `slices/INDEX.md`** — run:
    ```
@@ -153,8 +164,8 @@ sync with the code, set up `slices/DOCS.yaml` once:
 3. `slice stamp --all` to record baseline fingerprints.
 
 Skip this entirely if the repo only needs navigation — doc-staleness tracking is
-orthogonal to slice generation. Never invent `tracks:` mappings you can't ground in the
-code a doc actually describes.
+orthogonal to slice generation. Ground every `tracks:` mapping in the code the doc actually
+describes.
 
 ---
 
@@ -169,8 +180,8 @@ Report:
 
 ## Constraints
 
-- Never combine scout and refine work into one agent call — they have different responsibilities and tooling budgets.
-- Never run refine agents sequentially — always parallel.
-- Never use Explore, general-purpose, or any other agent type — always the `codebase-slicer` agent.
-- Never skip validation (Phase 3) after full generation.
-- Never ask the user for input during slicing — it is mechanical.
+- Always issue scout and refine as separate agent calls — each has its own responsibilities and tooling budget.
+- Always launch refine agents in parallel (one message, multiple Agent calls).
+- Always use the `codebase-slicer` agent for scan and refine work.
+- Always run Phase 3 validation after a full generation.
+- Drive slicing autonomously to completion — it is mechanical.

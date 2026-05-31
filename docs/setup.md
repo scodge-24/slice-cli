@@ -167,7 +167,7 @@ jobs:
           fetch-depth: 0
       - name: Install slice
         env:
-          SLICE_VERSION: v0.1.0
+          SLICE_VERSION: v0.2.0
         run: |
           curl -fsSL "https://github.com/scodge-24/slice-cli/releases/download/${SLICE_VERSION}/slice-x86_64-unknown-linux-gnu.tar.gz" -o slice.tar.gz
           tar -xzf slice.tar.gz

@@ -4,7 +4,7 @@ All notable changes to slice-cli are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 semantic versioning.
 
-## [Unreleased]
+## [0.2.0] — 2026-05-31
 
 ### Changed
 - **BREAKING: `slice init` is removed.** The CLI no longer writes agent instructions

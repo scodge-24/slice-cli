@@ -366,7 +366,7 @@ fn read_only_human_outputs_are_native_snapshots() {
 }
 
 #[test]
-fn subprocess_commands_and_init_dry_runs_are_native_snapshots() {
+fn subprocess_commands_are_native_snapshots() {
     let index = run_rust_raw(&["sync-index", "--stdout"]);
     assert_eq!(index.0, 0);
     assert!(stdout_text(&index).contains("# Slice Index"));
@@ -378,15 +378,6 @@ fn subprocess_commands_and_init_dry_runs_are_native_snapshots() {
     let grep = run_rust_raw(&["grep", "auth-service", "verify_token"]);
     assert_eq!(grep.0, 0);
     assert!(stdout_text(&grep).contains("src/auth/middleware.py"));
-
-    assert_eq!(
-        stdout_text(&run_rust_raw(&["init", "--dry-run"])),
-        "would write: CLAUDE.md\n"
-    );
-    assert_eq!(
-        stdout_text(&run_rust_raw(&["init", "--agent", "--dry-run"])),
-        "would write: CLAUDE.md\nwould write: .claude/skills/slice-codebase/SKILL.md\nwould write: .claude/agents/codebase-slicer.md\n"
-    );
 }
 
 #[test]
@@ -757,37 +748,6 @@ fn context_config_and_ambiguity_are_native_snapshots() {
 }
 
 #[test]
-fn native_init_writes_agent_block_hook_ci_and_agent() {
-    let temp = fixture_repo();
-    let repo = temp.path();
-    let result = run_rust_raw_for_repo(repo, &["init", "--hook", "--ci", "--agent"]);
-    assert_eq!(result.0, 0);
-
-    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
-    assert!(claude.contains("<!-- slice-cli:start -->"));
-    assert!(claude.contains("slice context"));
-    let hook = repo.join(".git/hooks/pre-commit");
-    assert!(hook.exists());
-    assert!(
-        std::fs::read_to_string(&hook)
-            .unwrap()
-            .contains("stale-docs")
-    );
-    assert!(repo.join(".github/workflows/slice-staleness.yml").exists());
-    let skill =
-        std::fs::read_to_string(repo.join(".claude/skills/slice-codebase/SKILL.md")).unwrap();
-    assert!(skill.contains("name: slice-codebase"));
-    assert!(!skill.contains("slice-cli:codebase-slicer"));
-    assert!(skill.contains("subagent_type: \"codebase-slicer\""));
-    assert!(repo.join(".claude/agents/codebase-slicer.md").exists());
-
-    let second = run_rust_raw_for_repo(repo, &["init"]);
-    assert_eq!(second.0, 0);
-    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
-    assert_eq!(claude.matches("<!-- slice-cli:start -->").count(), 1);
-}
-
-#[test]
 fn fingerprint_staleness_narrows_changed_files() {
     let temp = fixture_repo();
     let repo = temp.path();
@@ -1003,38 +963,32 @@ fn affected_docs_current_stale_unknown_text_and_multiple_paths() {
 }
 
 #[test]
-fn init_preserves_existing_agents_and_skips_skill_without_agent() {
+fn init_command_is_removed() {
+    // `slice init` and its policy-writing flags are gone: the CLI must reject the
+    // subcommand outright rather than silently writing CLAUDE.md / hooks / CI / .claude.
     let temp = fixture_repo();
     let repo = temp.path();
-    std::fs::write(repo.join("CLAUDE.md"), "# Existing\n").unwrap();
-    std::fs::write(repo.join("AGENTS.md"), "# Agents\n").unwrap();
-
     let result = run_rust_raw_for_repo(repo, &["init"]);
-    assert_eq!(result.0, 0);
-    assert!(
-        std::fs::read_to_string(repo.join("CLAUDE.md"))
-            .unwrap()
-            .starts_with("# Existing\n")
+    assert_eq!(
+        result.0,
+        2,
+        "slice init must be rejected, not run: {}",
+        stdout_text(&result)
     );
     assert!(
-        std::fs::read_to_string(repo.join("AGENTS.md"))
-            .unwrap()
-            .contains("slice context")
+        stderr_text(&result).contains("unrecognized subcommand")
+            || stderr_text(&result).contains("unexpected argument"),
+        "expected a clap usage error for the removed subcommand: {}",
+        stderr_text(&result)
     );
-    assert!(!repo.join(".claude/skills/slice-codebase/SKILL.md").exists());
+    assert!(
+        !repo.join("CLAUDE.md").exists(),
+        "init must not write CLAUDE.md"
+    );
 }
 
 #[test]
-fn init_help_includes_examples() {
-    let help = run_rust_raw(&["init", "-h"]);
-    assert_eq!(help.0, 0);
-    assert!(stdout_text(&help).contains("--agent"));
-    assert!(stdout_text(&help).contains("--docs"));
-    assert!(stdout_text(&help).contains("Examples"));
-}
-
-#[test]
-fn init_docs_bootstraps_when_tracks_present() {
+fn docs_bootstrap_writes_real_manifest_when_tracks_present() {
     let temp = fixture_repo();
     let repo = temp.path();
     std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
@@ -1044,7 +998,9 @@ fn init_docs_bootstraps_when_tracks_present() {
         "---\ndoc_id: auth-guide\ntracks:\n  - src/auth/middleware.py\n---\n# Auth Guide\n",
     )
     .unwrap();
-    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
+    // Relative `docs` exercises repo-root resolution: the test process CWD is the
+    // crate dir, not the fixture repo, so a CWD-relative resolve would miss it.
+    let result = run_rust_raw_for_repo(repo, &["docs-bootstrap", "docs"]);
     assert_eq!(result.0, 0, "{}", stderr_text(&result));
     let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
     assert!(manifest.contains("docs_root: ../docs"), "{manifest}");
@@ -1059,12 +1015,12 @@ fn init_docs_bootstraps_when_tracks_present() {
 }
 
 #[test]
-fn init_docs_writes_commented_stub_when_no_tracks() {
+fn docs_bootstrap_writes_commented_stub_when_no_tracks() {
     let temp = fixture_repo();
     let repo = temp.path();
     std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
     // fixture's docs/auth-guide.md has a doc_id but no `tracks:` frontmatter.
-    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
+    let result = run_rust_raw_for_repo(repo, &["docs-bootstrap", "docs"]);
     assert_eq!(result.0, 0, "{}", stderr_text(&result));
     let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
     assert!(manifest.contains("docs_root: ../docs"), "{manifest}");
@@ -1087,24 +1043,48 @@ fn init_docs_writes_commented_stub_when_no_tracks() {
 }
 
 #[test]
-fn init_docs_leaves_existing_manifest_untouched() {
+fn docs_bootstrap_refuses_existing_manifest_without_force() {
     let temp = fixture_repo();
     let repo = temp.path();
     let before = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
-    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "docs"]);
-    assert_eq!(result.0, 0);
-    assert!(stdout_text(&result).contains("already exists"));
+    let result = run_rust_raw_for_repo(repo, &["docs-bootstrap", "docs"]);
+    assert_eq!(
+        result.0,
+        1,
+        "must refuse an existing manifest without --force: {}",
+        stderr_text(&result)
+    );
+    assert!(stderr_text(&result).contains("already exists"));
     let after = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
     assert_eq!(before, after, "existing DOCS.yaml must not be clobbered");
 }
 
 #[test]
-fn init_docs_missing_dir_fails_loudly() {
+fn docs_bootstrap_force_regenerates_existing() {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    // The fixture ships a DOCS.yaml. Give the doc real tracks, then regenerate.
+    std::fs::write(
+        repo.join("docs/auth-guide.md"),
+        "---\ndoc_id: auth-guide\ntracks:\n  - src/auth/middleware.py\n---\n# Auth Guide\n",
+    )
+    .unwrap();
+    let forced = run_rust_raw_for_repo(repo, &["docs-bootstrap", "docs", "--force"]);
+    assert_eq!(forced.0, 0, "{}", stderr_text(&forced));
+    let manifest = std::fs::read_to_string(repo.join("slices/DOCS.yaml")).unwrap();
+    assert!(
+        manifest.contains("auth-guide:") && manifest.contains("auth-service"),
+        "--force should regenerate the manifest from the docs dir: {manifest}"
+    );
+}
+
+#[test]
+fn docs_bootstrap_missing_dir_fails_loudly() {
     let temp = fixture_repo();
     let repo = temp.path();
     std::fs::remove_file(repo.join("slices/DOCS.yaml")).unwrap();
     // A typo'd / moved docs dir must exit non-zero, not silently succeed with no manifest.
-    let result = run_rust_raw_for_repo(repo, &["init", "--docs", "nope-not-here"]);
+    let result = run_rust_raw_for_repo(repo, &["docs-bootstrap", "nope-not-here"]);
     assert_eq!(
         result.0,
         2,

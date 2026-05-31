@@ -956,17 +956,25 @@ fn print_bootstrap_summary(ctx: &Context, scan: &DocsScan) {
     }
 }
 
+/// Bootstrap `slices/DOCS.yaml` from a documentation directory. Writes real doc→slice
+/// mappings when any doc carries `tracks:` frontmatter; otherwise writes a commented
+/// stub seeded with the docs it found. Refuses to clobber an existing manifest without
+/// `--force`. Returns the exit code: 0 on success, 1 when a manifest already exists and
+/// `--force` was not given, 2 when the docs directory is missing — so a typo'd path
+/// fails loudly instead of silently leaving no manifest behind.
 pub fn docs_bootstrap(ctx: &Context, docs_dir: &Path, dry_run: bool, force: bool) -> Result<i32> {
-    let docs_dir = absolutize(docs_dir)?;
+    // Resolve a relative docs dir against the repo root, not the process CWD, so
+    // `slice --repo <repo> docs-bootstrap docs` works regardless of where it runs.
+    let docs_dir = if docs_dir.is_absolute() {
+        docs_dir.to_path_buf()
+    } else {
+        ctx.repo_root().join(docs_dir)
+    };
     if !docs_dir.exists() {
-        eprintln!("documentation directory not found: {}", docs_dir.display());
+        eprintln!("documentation directory not found: {}", ctx.rel(&docs_dir));
         return Ok(2);
     }
     let scan = scan_docs_dir(ctx, &docs_dir)?;
-    if scan.entries.is_empty() {
-        eprintln!("no .md files found in documentation directory");
-        return Ok(1);
-    }
     if dry_run {
         print_bootstrap_dry_run(&scan.docs_root, &scan.entries, &scan.unresolved);
         return Ok(0);
@@ -979,47 +987,6 @@ pub fn docs_bootstrap(ctx: &Context, docs_dir: &Path, dry_run: bool, force: bool
         );
         return Ok(1);
     }
-    save_doc_manifest(
-        &crate::models::DocManifest {
-            docs_root_raw: Some(scan.docs_root.clone()),
-            docs: scan_to_tracked_docs(&scan.entries),
-        },
-        ctx,
-    )?;
-    print_bootstrap_summary(ctx, &scan);
-    Ok(0)
-}
-
-/// Set up `slices/DOCS.yaml` as part of `slice init --docs <dir>`. Bootstraps real
-/// doc→slice mappings when any doc carries `tracks:` frontmatter; otherwise writes a
-/// commented stub seeded with the docs it found. Never clobbers an existing manifest.
-/// Returns the exit code: 0 on success (manifest written, or one already exists),
-/// 2 when the docs directory is missing — so a typo'd `--docs` path fails loudly
-/// instead of silently leaving no manifest behind.
-pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool) -> Result<i32> {
-    let manifest_path = ctx.docs_manifest_path();
-    if manifest_path.exists() {
-        println!(
-            "{} already exists - leaving it (use `slice docs-bootstrap --force` to regenerate)",
-            ctx.rel(&manifest_path)
-        );
-        return Ok(0);
-    }
-    // Resolve a relative --docs path against the repo root, not the process CWD.
-    let docs_dir = if docs_dir.is_absolute() {
-        docs_dir.to_path_buf()
-    } else {
-        ctx.repo_root().join(docs_dir)
-    };
-    if !docs_dir.exists() {
-        eprintln!("documentation directory not found: {}", ctx.rel(&docs_dir));
-        return Ok(2);
-    }
-    if dry_run {
-        println!("would set up doc tracking at {}", ctx.rel(&manifest_path));
-        return Ok(0);
-    }
-    let scan = scan_docs_dir(ctx, &docs_dir)?;
     if scan.any_tracks && !scan.entries.is_empty() {
         save_doc_manifest(
             &crate::models::DocManifest {
@@ -1035,7 +1002,7 @@ pub(crate) fn setup_docs_manifest(ctx: &Context, docs_dir: &Path, dry_run: bool)
         println!("wrote {} (stub)", ctx.rel(&manifest_path));
         println!("  Add `tracks: [<code paths>]` to each doc's frontmatter, then re-run");
         println!(
-            "  `slice init --docs {}` and `slice stamp --all`.",
+            "  `slice docs-bootstrap {} --force` and `slice stamp --all`.",
             ctx.rel(&docs_dir)
         );
     }
@@ -1050,7 +1017,7 @@ fn write_docs_stub(ctx: &Context, scan: &DocsScan) -> Result<()> {
     content.push_str(
         "#   1. add `tracks: [<code paths a doc describes>]` to each doc's frontmatter\n",
     );
-    content.push_str("#   2. re-run `slice init --docs <dir>` (or `slice docs-bootstrap <dir>`)\n");
+    content.push_str("#   2. re-run `slice docs-bootstrap <dir> --force` to pick up the tracks\n");
     content.push_str("#   3. `slice stamp --all` to record baselines\n");
     content.push_str("docs_root: ");
     content.push_str(&scan.docs_root);
@@ -1134,14 +1101,6 @@ struct BootstrapEntry {
     path: String,
     slices: Vec<String>,
     tags: Vec<String>,
-}
-
-fn absolutize(path: &Path) -> Result<std::path::PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
 }
 
 fn markdown_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {

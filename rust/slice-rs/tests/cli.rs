@@ -1099,6 +1099,19 @@ fn docs_bootstrap_missing_dir_fails_loudly() {
 }
 
 #[test]
+fn setup_guide_pins_current_slice_version() {
+    // docs/setup.md's CI snippet hardcodes a release version. Keep it in lockstep with
+    // the crate version so the copy-paste example never installs a stale binary.
+    let guide =
+        std::fs::read_to_string(repo_root().join("docs/setup.md")).expect("docs/setup.md exists");
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        guide.contains(&version),
+        "docs/setup.md must pin {version} (the current crate version) in its install snippet"
+    );
+}
+
+#[test]
 fn deps_reverse_transitive_excludes_self_on_cycle() {
     let temp = fixture_repo();
     let repo = temp.path();

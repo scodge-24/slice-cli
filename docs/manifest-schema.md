@@ -109,7 +109,7 @@ summary: >-
 | `tags` | No | Human-semantic tags. Searchable via `slice find`. |
 | `aliases` | No | Optional alternate names for the doc. |
 | `summary` | No | One-sentence description for agent context. Low token cost, high signal. |
-| `tracks` | No | Bootstrap-only list of code paths the doc describes. Read once by `slice init --docs` / `slice docs-bootstrap` to resolve the doc's owning slices into `DOCS.yaml`, then ignored — not stored in the manifest and not a runtime mapping source. |
+| `tracks` | No | Bootstrap-only list of code paths the doc describes. Read once by `slice docs-bootstrap` to resolve the doc's owning slices into `DOCS.yaml`, then ignored — not stored in the manifest and not a runtime mapping source. |
 
 ## Validation Rules (slice check)
 

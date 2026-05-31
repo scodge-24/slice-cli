@@ -181,9 +181,10 @@ slice docs-bootstrap docs --force
 slice stamp new-feature-guide
 ```
 
-First-time setup (no DOCS.yaml yet): `slice init --docs docs` bootstraps the manifest
+First-time setup (no DOCS.yaml yet): `slice docs-bootstrap docs` bootstraps the manifest
 from docs that carry `tracks:` frontmatter, or writes a commented stub seeded with the
-docs it found so you can fill in the mappings.
+docs it found so you can fill in the mappings. See [`setup.md`](setup.md) for the full
+repo-setup runbook (install, agent bootstrap, optional CI/hook/agent integrations).
 
 ## Command Reference
 

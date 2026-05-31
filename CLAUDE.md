@@ -30,9 +30,10 @@ implementation is preserved at tag `python-impl-final` / branch `package-refacto
 
 - `DOCS.yaml` is the single source of truth for doc-to-slice mapping and staleness. Staleness is anchored on a content `fingerprint` of each doc's tracked files (recorded by `slice stamp`); `verified_at` is a human-readable HEAD note. Legacy entries without a fingerprint fall back to git SHA-diff. Docs and slice files stay clean of tracking metadata.
 - Keep changes focused in the module that owns the concern.
-- The embedded `slice init` templates must stay byte-identical to the committed
-  `skills/slice-codebase/SKILL.md` and `agents/codebase-slicer.md` (guarded by the
-  `embedded_templates_match_committed_files` test).
+- The CLI writes only slice-owned state (`slices/DOCS.yaml` via `slice
+  docs-bootstrap`, the `sync-index` artifact). Host/project policy — agent
+  instructions, git hooks, CI workflows, `.claude/` files — is never written by the
+  binary; it lives as agent-run setup guidance in `docs/setup.md`.
 
 ## Module map
 
@@ -44,7 +45,6 @@ implementation is preserved at tag `python-impl-final` / branch `package-refacto
 | doc manifest load/save | `manifest.rs` |
 | command handlers (list/show/stale/affected/stamp/…) | `commands.rs` |
 | validation (`slice check`) + verification links | `check.rs` |
-| `slice init` + embedded templates | `init.rs` |
 | config (context ambiguity) | `config.rs` |
 | CLI wiring / arg parsing | `cli.rs` |
 | data types | `models.rs` |

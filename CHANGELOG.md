@@ -4,6 +4,27 @@ All notable changes to slice-cli are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 semantic versioning.
 
+## [Unreleased]
+
+### Changed
+- **BREAKING: `slice init` is removed.** The CLI no longer writes agent instructions
+  (`CLAUDE.md` / `AGENTS.md`), git hooks, GitHub Actions workflows, or loose
+  `.claude/` skill/agent files — it writes only slice-owned state. Set up
+  `slices/DOCS.yaml` with `slice docs-bootstrap <dir>` (formerly `slice init --docs`).
+- `slice docs-bootstrap` absorbs the former `init --docs` behavior: it writes a
+  commented stub when no doc carries `tracks:` yet, resolves a relative docs dir
+  against the repo root (not the process CWD), and regenerates an existing manifest
+  with `--force`.
+- Optional CI / hook / agent-instruction / skill setup now lives in an agent-run
+  runbook, [`docs/setup.md`](docs/setup.md), applied with the repo owner's consent
+  rather than by the binary.
+
+### Migration
+Repos that ran the old `slice init` can remove the generated files by hand:
+- delete the `<!-- slice-cli:start -->` block from `CLAUDE.md` / `AGENTS.md`
+- delete `.github/workflows/slice-staleness.yml` if you don't want it
+- inspect `.git/hooks/pre-commit` before removing it
+
 ## [0.1.0] — 2026-05-31
 
 First public release.

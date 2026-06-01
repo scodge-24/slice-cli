@@ -66,6 +66,10 @@ Parsing rules:
 - A `- ` bullet containing ` <- ` (space, less-than, hyphen, space) splits into
   `(abstraction, [refs])`. The abstraction is the leading token (surrounding backticks
   stripped). Refs are comma-separated, each a `path` or `path::symbol`.
+- **Name one symbol per abstraction.** The reader matches the *whole* abstraction string
+  (the text before ` — ` in an `abstractions:` entry) against the backticked link name, so
+  a slash-joined `A / B / C` entry matches none of its individual links. Give each symbol
+  its own `abstractions:` entry and its own ` <- ` link.
 - A `- upstream:` bullet lists one or more design-doc / requirement paths.
 - `::symbol` is advisory and not validated — only the *file* is checked, mirroring the
   `files[]` existence check.

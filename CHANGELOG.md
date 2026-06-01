@@ -4,6 +4,27 @@ All notable changes to slice-cli are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 semantic versioning.
 
+## [0.2.1] — 2026-06-01
+
+### Changed
+- **`/slice-codebase` produces correct slice cards.** Hardened the bundled
+  `codebase-slicer` agent and `slice-codebase` skill after a full re-slice surfaced
+  recurring card defects:
+  - `dependencies:` now means **callees** (slices this one calls into, derived from
+    `outgoingCalls`); callers feed the reverse view (`slice deps --reverse`) and the
+    verification links. Reversed edges had been passing `slice check`, which validates
+    id existence, not direction — so Phase 3 now runs `slice deps` per slice as a
+    deterministic direction self-review.
+  - A single source file always belongs to exactly one slice; an oversized file stays
+    whole rather than being split by line range.
+  - Each `abstractions:` entry names one symbol, so it matches its verification link
+    (slash-joined `A / B / C` entries matched none of theirs).
+
+### For contributors
+- Converted the agent/skill prompts from prohibition ("do not / never") to affirmative
+  directives, per Opus 4.8 prompting guidance, and fixed a duplicate "Step 6" heading in
+  the agent definition. Prompts only — no `rust/slice-rs/` change.
+
 ## [0.2.0] — 2026-05-31
 
 ### Changed

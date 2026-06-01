@@ -39,18 +39,29 @@ jobs:
       - name: Build
         run: cargo build --release --locked --manifest-path rust/slice-rs/Cargo.toml --target ${{ matrix.target }}
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Generate third-party licenses
+        run: cargo about generate -c rust/slice-rs/about.toml --manifest-path rust/slice-rs/Cargo.toml rust/slice-rs/about.hbs -o THIRD-PARTY-LICENSES.html
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           bin="rust/slice-rs/target/${{ matrix.target }}/release/slice"
-          tar -czf "slice-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" slice
+          mkdir -p dist
+          cp "$bin" THIRD-PARTY-LICENSES.html LICENSE dist/
+          tar -czf "slice-${{ matrix.target }}.tar.gz" -C dist slice THIRD-PARTY-LICENSES.html LICENSE
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           bin="rust/slice-rs/target/${{ matrix.target }}/release/slice.exe"
-          7z a "slice-${{ matrix.target }}.zip" "$bin"
+          mkdir -p dist
+          cp "$bin" THIRD-PARTY-LICENSES.html LICENSE dist/
+          7z a "slice-${{ matrix.target }}.zip" ./dist/*
 
       - name: Attach to release
         uses: softprops/action-gh-release@v3

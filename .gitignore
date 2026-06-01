@@ -12,3 +12,6 @@ rust/slice-rs/target/
 
 # local implementation plans
 /docs/setup-guidance-deintrusion-plan.md
+
+# generated at release time by cargo-about, bundled into archives (not committed)
+/THIRD-PARTY-LICENSES.html

@@ -9,3 +9,6 @@ design/
 .gstack/
 target/
 rust/slice-rs/target/
+
+# local implementation plans
+/docs/setup-guidance-deintrusion-plan.md

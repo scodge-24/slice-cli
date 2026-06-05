@@ -247,9 +247,11 @@ fn verification_associations(ctx: &Context, path: &str) -> Result<Vec<(String, S
             .into_iter()
             .flat_map(|(_, refs)| refs)
             .any(|reference| {
-                // refs look like `tests/foo.py::TestBar`; match on the file part only.
+                // refs look like `tests/foo.py::TestBar`; match on the file part only, normalized
+                // the same way the query path is (e.g. strip a leading `./`) so the forms line up.
                 let file = reference.split("::").next().unwrap_or(&reference).trim();
-                matches_path(&normalized, file)
+                let file = crate::paths::normalize_repo_path(file, ctx);
+                matches_path(&normalized, &file)
             });
         if referenced {
             out.push((doc.slice_id.clone(), doc.description.clone()));
@@ -424,7 +426,7 @@ pub fn context(
             return Ok(1);
         } else {
             // Human-only fallback: resolve a test file to the slice(s) that reference it.
-            let ids: Vec<String> = verification_associations(ctx, selector)?
+            let ids: FxHashSet<String> = verification_associations(ctx, selector)?
                 .into_iter()
                 .map(|(slice_id, _)| slice_id)
                 .collect();
@@ -855,22 +857,30 @@ fn grep_with_symbols(
         let text = data["lines"]["text"].as_str().unwrap_or_default();
         let text = text.trim_end_matches(['\n', '\r']);
 
-        write!(lock, "{path}:{lineno}:{text}")?;
-        if let Some(lang) = crate::symbols::lang_for_path(path) {
+        // Resolve the optional enclosing-span annotation (each file read once, cached).
+        let span = crate::symbols::lang_for_path(path).and_then(|lang| {
             let content = file_cache
                 .entry(path.to_owned())
                 .or_insert_with(|| std::fs::read_to_string(ctx.repo_root().join(path)).ok());
-            if let Some(content) = content
-                && let Some(sym) = crate::symbols::enclosing_span(content, lineno, lang)
-            {
-                write!(
-                    lock,
-                    "\t[span {} {}-{} approx]",
-                    sym.name, sym.start, sym.end
-                )?;
-            }
+            content
+                .as_ref()
+                .and_then(|c| crate::symbols::enclosing_span(c, lineno, lang))
+        });
+        let written = match &span {
+            Some(sym) => writeln!(
+                lock,
+                "{path}:{lineno}:{text}\t[span {} {}-{} approx]",
+                sym.name, sym.start, sym.end
+            ),
+            None => writeln!(lock, "{path}:{lineno}:{text}"),
+        };
+        // A closed consumer (e.g. `slice grep --symbols … | head`) is a normal early exit, not a
+        // CLI error — mirror rg's graceful handling instead of bubbling BrokenPipe up as exit 2.
+        match written {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
+            Err(err) => return Err(err.into()),
         }
-        writeln!(lock)?;
     }
     Ok(output.status.code().unwrap_or(1))
 }
@@ -1845,30 +1855,47 @@ pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-/// Resolve an abstraction to `path:line` of its definition, or `None` when it can't be pinned
-/// unambiguously. Searches the slice's files; requires the symbol to be defined in exactly one of
-/// them (a duplicate or no definition → no location, never a guess). Reuses `normalize_abstraction`
-/// so the name is parsed the same way `check` does.
-fn abstraction_location(ctx: &Context, files: &[String], abstraction: &str) -> Option<String> {
-    let name = crate::check::normalize_abstraction(abstraction);
-    if name.is_empty() {
-        return None;
-    }
-    let mut hit: Option<String> = None;
+/// A slice's source file read once: `(repo-relative path, language, contents)`.
+type SliceSource = (String, crate::symbols::Lang, String);
+
+/// Expand a slice's file patterns and read each supported source exactly once (deduped across
+/// overlapping patterns), so abstraction lookup doesn't re-read files per abstraction.
+fn read_slice_sources(ctx: &Context, files: &[String]) -> Vec<SliceSource> {
+    let mut seen = FxHashSet::default();
+    let mut out = Vec::new();
     for pattern in files {
         for rel in expand_literal_or_existing(pattern, ctx) {
+            if !seen.insert(rel.clone()) {
+                continue;
+            }
             let Some(lang) = crate::symbols::lang_for_path(&rel) else {
                 continue;
             };
             let Ok(content) = std::fs::read_to_string(repo_join(ctx, &rel)) else {
                 continue;
             };
-            if let Some((start, _)) = crate::symbols::definition_span(&content, &name, lang) {
-                if hit.is_some() {
-                    return None; // defined in more than one file → ambiguous
-                }
-                hit = Some(format!("{rel}:{start}"));
+            out.push((rel, lang, content));
+        }
+    }
+    out
+}
+
+/// Resolve an abstraction to `path:line` of its definition, or `None` when it can't be pinned
+/// unambiguously. Requires the symbol to be defined in exactly one of the slice's files (a
+/// duplicate or no definition → no location, never a guess). Reuses `normalize_abstraction` so the
+/// name is parsed the same way `check` does.
+fn abstraction_location(sources: &[SliceSource], abstraction: &str) -> Option<String> {
+    let name = crate::check::normalize_abstraction(abstraction);
+    if name.is_empty() {
+        return None;
+    }
+    let mut hit: Option<String> = None;
+    for (rel, lang, content) in sources {
+        if let Some((start, _)) = crate::symbols::definition_span(content, &name, *lang) {
+            if hit.is_some() {
+                return None; // defined in more than one file → ambiguous
             }
+            hit = Some(format!("{rel}:{start}"));
         }
     }
     hit
@@ -1883,8 +1910,9 @@ fn print_abstractions(ctx: &Context, files: &[String], abstractions: &[String], 
         return;
     }
     println!("{label}");
+    let sources = read_slice_sources(ctx, files);
     for value in abstractions {
-        match abstraction_location(ctx, files, value) {
+        match abstraction_location(&sources, value) {
             Some(loc) => println!(
                 "  - {value}  {}",
                 styles.paint(styles.dim, &format!("({loc})"))

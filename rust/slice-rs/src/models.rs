@@ -82,6 +82,19 @@ pub struct DepsOutput<'a> {
     pub dependencies: Vec<String>,
     pub mode: &'a str,
     pub slice_id: &'a str,
+    /// Concrete files of the dependency slices (`deps --files`, the blast-radius "candidate file
+    /// discovery" hop). `None` unless `--files` is passed, and `skip_serializing_if` keeps the
+    /// default JSON byte-identical for existing consumers — this field is purely additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<CollaboratorFile>>,
+}
+
+/// One file in a dependency slice's blast radius, with the slice that owns it (file-level
+/// provenance: `slice_id` + `file`; the `file:line` precision lands at the read, not here).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CollaboratorFile {
+    pub slice_id: String,
+    pub file: String,
 }
 
 #[derive(Debug, Serialize)]

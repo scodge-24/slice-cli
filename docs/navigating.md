@@ -47,10 +47,17 @@ slice deps auth-service                       # what this slice depends on (dire
 slice deps auth-service --transitive          # …and transitively
 slice deps auth-service --reverse             # who depends on this slice (direct)
 slice deps auth-service --reverse --transitive   # the full upstream blast radius
+slice deps auth-service --reverse --transitive --files  # …as concrete files to read
 ```
 
 Run the reverse-transitive form before editing a low-level slice: it lists every slice
 that would be affected, directly or through intermediaries.
+
+Add `--files` to turn that radius into the concrete collaborator files you'd actually open —
+each tagged with the slice that owns it, nearest dependents first, deduplicated — so you read
+them directly instead of re-deriving paths from slice ids. `slice context <file>` also prints a
+one-line `blast-radius:` summary pointing at this command, so the radius is visible without
+asking for it.
 
 ## Find a concept
 

@@ -724,6 +724,148 @@ fn deps_reverse_transitive_walks_multiple_hops() {
     assert_eq!(deps, vec!["chain-b".to_string(), "chain-c".to_string()]);
 }
 
+// Builds the chain-a → chain-b → chain-c fixture (each slice owns its own file, unambiguously) used
+// by the blast-radius tests.
+fn chain_fixture() -> TempDir {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        std::fs::write(repo.join(format!("src/{name}.rs")), "// x\n").unwrap();
+    }
+    std::fs::write(
+        repo.join("slices/chain-a.md"),
+        "---\nslice_id: chain-a\ndescription: A\nfiles:\n  - src/chain_a.rs\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-b.md"),
+        "---\nslice_id: chain-b\ndescription: B\nfiles:\n  - src/chain_b.rs\ndependencies:\n  - chain-a\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-c.md"),
+        "---\nslice_id: chain-c\ndescription: C\nfiles:\n  - src/chain_c.rs\ndependencies:\n  - chain-b\n---\n",
+    )
+    .unwrap();
+    temp
+}
+
+#[test]
+fn deps_files_lists_blast_radius_deduped_ordered_and_additive() {
+    let temp = chain_fixture();
+    let repo = temp.path();
+    // chain-c also owns chain-b's file, to exercise dedup across the transitive set (local to this
+    // test so the shared file doesn't make `context` queries ambiguous elsewhere).
+    std::fs::write(
+        repo.join("slices/chain-c.md"),
+        "---\nslice_id: chain-c\ndescription: C\nfiles:\n  - src/chain_b.rs\n  - src/chain_c.rs\ndependencies:\n  - chain-b\n---\n",
+    )
+    .unwrap();
+
+    // --files resolves the reverse-transitive blast radius to concrete files: nearest collaborator
+    // first (chain-b before chain-c), each file attributed to its slice, the shared src/chain_b.rs
+    // emitted once on the nearer slice (chain-b), and no cap drops chain-c's own file.
+    let out = run_rust_for_repo(
+        repo,
+        &[
+            "deps",
+            "chain-a",
+            "--reverse",
+            "--transitive",
+            "--files",
+            "--json",
+        ],
+    );
+    assert_eq!(out.0, 0);
+    assert_eq!(
+        out.1["files"],
+        json!([
+            {"slice_id": "chain-b", "file": "src/chain_b.rs"},
+            {"slice_id": "chain-c", "file": "src/chain_c.rs"},
+        ])
+    );
+
+    // Human output: file<TAB>slice_id (the file — the actionable read target — first), same order.
+    let human = run_rust_raw_for_repo(
+        repo,
+        &["deps", "chain-a", "--reverse", "--transitive", "--files"],
+    );
+    assert_eq!(human.0, 0);
+    assert_eq!(
+        stdout_text(&human),
+        "src/chain_b.rs\tchain-b\nsrc/chain_c.rs\tchain-c\n"
+    );
+
+    // Regression guard: WITHOUT --files the JSON is byte-identical to before — no `files` key.
+    let plain = run_rust_for_repo(
+        repo,
+        &["deps", "chain-a", "--reverse", "--transitive", "--json"],
+    );
+    assert!(
+        plain.1.get("files").is_none(),
+        "default deps JSON must not gain a files field; got {}",
+        plain.1
+    );
+
+    // A slice with no reverse-deps returns an empty list at exit 0, not an error.
+    let leaf = run_rust_for_repo(
+        repo,
+        &[
+            "deps",
+            "chain-c",
+            "--reverse",
+            "--transitive",
+            "--files",
+            "--json",
+        ],
+    );
+    assert_eq!(leaf.0, 0);
+    assert_eq!(leaf.1["dependencies"], json!([]));
+    assert_eq!(leaf.1["files"], json!([]));
+}
+
+#[test]
+fn context_human_advertises_blast_radius_but_json_is_unchanged() {
+    let temp = chain_fixture();
+    let repo = temp.path();
+
+    // Human context for chain-a advertises its blast radius factually (affordance, principle P).
+    let human = run_rust_raw_for_repo(repo, &["context", "src/chain_a.rs"]);
+    assert_eq!(human.0, 0);
+    assert!(
+        stdout_text(&human).contains(
+            "blast-radius: 2 files in 2 reverse-dep slices — slice deps chain-a --reverse --transitive --files"
+        ),
+        "context human output should advertise the blast radius; got:\n{}",
+        stdout_text(&human)
+    );
+
+    // The JSON contract is unchanged — no blast-radius leaks into ContextOutput.
+    let machine = run_rust_for_repo(repo, &["context", "src/chain_a.rs", "--json"]);
+    assert_eq!(machine.0, 0);
+    assert!(
+        !machine.1.to_string().contains("blast-radius"),
+        "context JSON must stay byte-identical"
+    );
+
+    // A leaf slice (nothing depends on it) omits the line entirely.
+    let leaf = run_rust_raw_for_repo(repo, &["context", "src/chain_c.rs"]);
+    assert_eq!(leaf.0, 0);
+    assert!(
+        !stdout_text(&leaf).contains("blast-radius:"),
+        "no blast-radius line when the radius is empty"
+    );
+
+    // Singular grammar: chain-b's blast radius is a single slice (chain-c) owning a single file.
+    let one = run_rust_raw_for_repo(repo, &["context", "src/chain_b.rs"]);
+    assert_eq!(one.0, 0);
+    assert!(
+        stdout_text(&one).contains("blast-radius: 1 file in 1 reverse-dep slice — "),
+        "singular 'file'/'slice' for a one-file, one-slice radius; got:\n{}",
+        stdout_text(&one)
+    );
+}
+
 #[test]
 fn native_check_json_reports_index_and_staged_coverage() {
     let temp = fixture_repo();

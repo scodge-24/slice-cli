@@ -25,8 +25,12 @@ slice context src/auth/middleware.py
 
 Returns: owning slice, files, dependencies, linked docs with stale/current status
 (when `DOCS.yaml` exists), then the standard body sections — `System Behavior`,
-`Invariants`, `Runtime Flows`, `Verification`, `Update Triggers`. Add `--json` for
-a stable `{"slices": [...]}` payload.
+`Invariants`, `Runtime Flows`, `Verification`, `Update Triggers`. The human output also
+carries a one-line `blast-radius:` summary — how many collaborator files depend on this slice,
+plus the `slice deps … --reverse --transitive --files` command that lists them — so you can
+pull the affected files into context before editing instead of grepping for them. Add `--json`
+for a stable `{"slices": [...]}` payload (the blast-radius hint is human-output only; the JSON
+contract is unchanged).
 
 Ambiguous ownership (a file owned by more than one slice) follows
 `slices/config.yaml` → `context.ambiguity` (`strict` default fails and lists the

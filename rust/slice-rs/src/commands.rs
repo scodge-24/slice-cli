@@ -14,8 +14,9 @@ use crate::context::Context;
 use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
 use crate::manifest::{load_doc_manifest, save_doc_manifest};
 use crate::models::{
-    AffectedDoc, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch, ListRow,
-    ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc, TrackedDocSummary,
+    AffectedDoc, CollaboratorFile, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch,
+    ListRow, ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc,
+    TrackedDocSummary,
 };
 use crate::paths::{expand_literal_or_existing, matches_path, repo_join};
 use crate::slices::{
@@ -192,11 +193,15 @@ pub fn files(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+// The four bools mirror `deps`' clap flags one-to-one; the only caller is the clap dispatch in
+// `cli.rs`, which destructures them by name, so there's no positional-boolean ambiguity to guard.
+#[allow(clippy::fn_params_excessive_bools)]
 pub fn deps(
     ctx: &Context,
     selector: &str,
     reverse: bool,
     transitive: bool,
+    files: bool,
     json: bool,
 ) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
@@ -219,18 +224,61 @@ pub fn deps(
         (doc.dependencies.clone(), "direct")
     };
 
+    // `--files` resolves the dependency slices to their concrete files — the blast-radius
+    // "candidate file discovery" hop. Opt-in, so the default output is unchanged.
+    let collaborator_files = files.then(|| collaborator_files(&dependencies, &docs));
+
     if json {
         emit_json(&DepsOutput {
             dependencies,
             mode,
             slice_id: &doc.slice_id,
+            files: collaborator_files,
         })?;
+    } else if let Some(collaborators) = collaborator_files {
+        // File-level provenance: `file<TAB>slice_id`, the file (the actionable read target) first.
+        for cf in collaborators {
+            println!("{}\t{}", cf.file, cf.slice_id);
+        }
     } else {
         for dep in dependencies {
             println!("{dep}");
         }
     }
     Ok(0)
+}
+
+/// Resolve dependency slice ids to their concrete files for `deps --files`. File-level by design —
+/// `file:line` precision lives at the read (`grep --symbols`), per the layered-provenance invariant.
+///
+/// Scoping rule (the unit test is the spec):
+/// - output order follows `dependency_ids`, which for `--reverse --transitive` is BFS distance order
+///   (nearest collaborators first) — so ranking is by reverse-dep distance;
+/// - within a slice, files keep their declared order;
+/// - a file owned by several collaborators is emitted **once**, attributed to the first (nearest)
+///   slice that owns it.
+///
+/// No cap: dropping a collaborator file could hide gold (the kill-condition concern). Dedupe +
+/// distance ranking is the scoping; over-pull is handled by the gated anchoring escalation, never by
+/// silently truncating here.
+fn collaborator_files(dependency_ids: &[String], docs: &[SliceDoc]) -> Vec<CollaboratorFile> {
+    let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
+    let mut seen = FxHashSet::default();
+    let mut out = Vec::new();
+    for sid in dependency_ids {
+        let Some(doc) = by_id.get(sid.as_str()) else {
+            continue; // dependency id with no matching slice doc — nothing to list
+        };
+        for file in &doc.files {
+            if seen.insert(file.clone()) {
+                out.push(CollaboratorFile {
+                    slice_id: doc.slice_id.clone(),
+                    file: file.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Slices that reference `path` as a Verification target (e.g. a test file), used as a fallback for
@@ -499,6 +547,21 @@ pub fn context(
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));
+            // Affordance (principle P): advertise the blast radius factually so the agent pulls it in
+            // instead of falling back to brute-force grep (FINDINGS failure mode #2). Human output
+            // only — the JSON contract (ContextOutput) stays byte-identical.
+            let blast = transitive_reverse_deps(&doc.slice_id, &docs);
+            if !blast.is_empty() {
+                let n_files = collaborator_files(&blast, &docs).len();
+                let n_slices = blast.len();
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                println!(
+                    "blast-radius: {n_files} file{} in {n_slices} reverse-dep slice{} — slice deps {} --reverse --transitive --files",
+                    plural(n_files),
+                    plural(n_slices),
+                    doc.slice_id
+                );
+            }
             let body = load_slice_body(ctx, doc)?;
             for (heading, text) in present_sections(&body) {
                 println!("{heading}:");
@@ -1988,7 +2051,7 @@ mod tests {
         slice_lede,
     };
     use crate::color::{ColorChoice, Styles};
-    use crate::models::SliceDoc;
+    use crate::models::{CollaboratorFile, SliceDoc};
 
     fn slice(id: &str, description: &str, loc: Option<u64>) -> SliceDoc {
         SliceDoc {
@@ -2002,6 +2065,42 @@ mod tests {
             exclusions: Vec::new(),
             body: String::new(),
         }
+    }
+
+    #[test]
+    fn collaborator_files_dedupes_and_preserves_distance_order() {
+        let mut b = slice("chain-b", "B", None);
+        b.files = vec!["src/b.rs".to_owned(), "src/shared.rs".to_owned()];
+        let mut c = slice("chain-c", "C", None);
+        c.files = vec!["src/shared.rs".to_owned(), "src/c.rs".to_owned()];
+        let docs = vec![b, c];
+
+        // dependency_ids arrive in distance order (nearest first): chain-b, then chain-c.
+        let out = super::collaborator_files(&["chain-b".to_owned(), "chain-c".to_owned()], &docs);
+        assert_eq!(
+            out,
+            vec![
+                CollaboratorFile {
+                    slice_id: "chain-b".to_owned(),
+                    file: "src/b.rs".to_owned(),
+                },
+                // src/shared.rs is attributed to the NEARER slice (chain-b) and emitted once...
+                CollaboratorFile {
+                    slice_id: "chain-b".to_owned(),
+                    file: "src/shared.rs".to_owned(),
+                },
+                // ...so chain-c contributes only its non-duplicate file. No cap drops it.
+                CollaboratorFile {
+                    slice_id: "chain-c".to_owned(),
+                    file: "src/c.rs".to_owned(),
+                },
+            ]
+        );
+
+        // Empty blast radius → empty output (the caller turns this into an exit-0 empty list).
+        assert!(super::collaborator_files(&[], &docs).is_empty());
+        // An unknown dependency id is skipped, not an error.
+        assert!(super::collaborator_files(&["ghost".to_owned()], &docs).is_empty());
     }
 
     #[test]

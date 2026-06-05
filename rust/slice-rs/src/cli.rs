@@ -67,6 +67,9 @@ enum Command {
         reverse: bool,
         #[arg(long)]
         transitive: bool,
+        /// List the concrete files of the dependency slices (the blast radius), not just slice ids.
+        #[arg(long)]
+        files: bool,
         #[arg(long)]
         json: bool,
     },
@@ -258,8 +261,9 @@ fn run_inner(args: Args) -> Result<i32> {
             selector,
             reverse,
             transitive,
+            files,
             json,
-        } => commands::deps(&ctx, &selector, reverse, transitive, json),
+        } => commands::deps(&ctx, &selector, reverse, transitive, files, json),
         Command::ForPath { path, json } => commands::for_path(&ctx, &path, json),
         Command::AffectedDocs { paths, json } => commands::affected_docs(&ctx, &paths, json),
         Command::Context {

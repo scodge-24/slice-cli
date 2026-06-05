@@ -404,6 +404,43 @@ fn subprocess_commands_are_native_snapshots() {
 }
 
 #[test]
+fn grep_symbols_annotates_enclosing_span_opt_in() {
+    // Opt-in --symbols appends a heuristic [span Name start-end approx] suffix for a clean
+    // top-level def (verify_token in middleware.py).
+    let with = run_rust_raw(&["grep", "auth-service", "def verify_token", "--symbols"]);
+    assert_eq!(with.0, 0);
+    let text = stdout_text(&with);
+    assert!(
+        text.contains("[span verify_token") && text.contains("approx]"),
+        "expected a span annotation, got: {text}"
+    );
+
+    // Default mode is unchanged — never annotates.
+    let without = run_rust_raw(&["grep", "auth-service", "def verify_token"]);
+    assert!(!stdout_text(&without).contains("[span"));
+
+    // A decorated def is ambiguous (api-handlers get_user is preceded by @require_auth) → left
+    // unannotated rather than mis-spanned.
+    let decorated = run_rust_raw(&["grep", "api-handlers", "def get_user", "--symbols"]);
+    assert_eq!(decorated.0, 0);
+    assert!(
+        !stdout_text(&decorated).contains("[span"),
+        "decorated def must not be annotated: {}",
+        stdout_text(&decorated)
+    );
+
+    // No-match preserves rg's exit code 1 in both modes.
+    assert_eq!(
+        run_rust_raw(&["grep", "auth-service", "zzz_nomatch_zzz"]).0,
+        1
+    );
+    assert_eq!(
+        run_rust_raw(&["grep", "auth-service", "zzz_nomatch_zzz", "--symbols"]).0,
+        1
+    );
+}
+
+#[test]
 fn native_write_commands_have_expected_observable_behavior() {
     let temp = fixture_repo();
     let repo = temp.path();

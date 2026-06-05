@@ -696,12 +696,17 @@ pub fn grep(
     pattern: &str,
     ignore_case: bool,
     fixed_strings: bool,
+    symbols: bool,
 ) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
     if doc.files.is_empty() {
         eprintln!("{} has no files[]", doc.slice_id);
         return Ok(1);
+    }
+
+    if symbols {
+        return grep_with_symbols(ctx, &doc.files, pattern, ignore_case, fixed_strings);
     }
 
     let mut command = Command::new("rg");
@@ -729,6 +734,84 @@ pub fn grep(
         }
         Err(err) => Err(Error::Io(err)),
     }
+}
+
+/// `grep --symbols`: run `rg --json` so the path + line number come structurally (no fragile
+/// `path:line:text` re-parse), then append a stable, uncolored `\t[span <Name> <start>-<end> approx]`
+/// suffix naming the enclosing function/class. Unresolved/ambiguous hits are emitted bare. rg's exit
+/// code (0 match / 1 none / 2 error) and stderr are preserved.
+fn grep_with_symbols(
+    ctx: &Context,
+    files: &[String],
+    pattern: &str,
+    ignore_case: bool,
+    fixed_strings: bool,
+) -> Result<i32> {
+    let mut command = Command::new("rg");
+    command.arg("--json");
+    if ignore_case {
+        command.arg("-i");
+    }
+    if fixed_strings {
+        command.arg("-F");
+    }
+    command.arg(pattern);
+    for slice_pattern in files {
+        let expanded = expand_literal_or_existing(slice_pattern, ctx);
+        if expanded.is_empty() {
+            command.arg(slice_pattern);
+        } else {
+            command.args(expanded);
+        }
+    }
+    let output = match command.current_dir(ctx.repo_root()).output() {
+        Ok(out) => out,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("rg is required for `slice grep`");
+            return Ok(2);
+        }
+        Err(err) => return Err(Error::Io(err)),
+    };
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let mut file_cache: FxHashMap<String, Option<String>> = FxHashMap::default();
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+            continue;
+        }
+        let data = &event["data"];
+        let Some(path) = data["path"]["text"].as_str() else {
+            continue; // non-UTF8 path: skip rather than emit a malformed line
+        };
+        let lineno = usize::try_from(data["line_number"].as_u64().unwrap_or(0)).unwrap_or(0);
+        let text = data["lines"]["text"].as_str().unwrap_or_default();
+        let text = text.trim_end_matches(['\n', '\r']);
+
+        write!(lock, "{path}:{lineno}:{text}")?;
+        if let Some(lang) = crate::symbols::lang_for_path(path) {
+            let content = file_cache
+                .entry(path.to_owned())
+                .or_insert_with(|| std::fs::read_to_string(ctx.repo_root().join(path)).ok());
+            if let Some(content) = content
+                && let Some(sym) = crate::symbols::enclosing_span(content, lineno, lang)
+            {
+                write!(
+                    lock,
+                    "\t[span {} {}-{} approx]",
+                    sym.name, sym.start, sym.end
+                )?;
+            }
+        }
+        writeln!(lock)?;
+    }
+    Ok(output.status.code().unwrap_or(1))
 }
 
 pub fn docs(ctx: &Context, selector: &str, json: bool) -> Result<i32> {

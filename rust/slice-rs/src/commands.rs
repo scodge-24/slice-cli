@@ -233,10 +233,36 @@ pub fn deps(
     Ok(0)
 }
 
+/// Slices that reference `path` as a Verification target (e.g. a test file), used as a fallback for
+/// `for`/`context` when no `files:` owner matches. Returns `(slice_id, description)`. Loads full-body
+/// docs because the Verification links live in the body (the metadata loader drops it); this is a
+/// cold path, so the extra read is fine. Does NOT touch `owners_for_path`, so `affected-docs` and
+/// staleness are unaffected. Verification refs only — `exclusions:` is a disown signal, not ownership.
+fn verification_associations(ctx: &Context, path: &str) -> Result<Vec<(String, String)>> {
+    let normalized = crate::paths::normalize_repo_path(path, ctx);
+    let docs = load_slice_docs(ctx)?;
+    let mut out = Vec::new();
+    for doc in &docs {
+        let referenced = crate::check::parse_verification(&doc.body)
+            .into_iter()
+            .flat_map(|(_, refs)| refs)
+            .any(|reference| {
+                // refs look like `tests/foo.py::TestBar`; match on the file part only.
+                let file = reference.split("::").next().unwrap_or(&reference).trim();
+                matches_path(&normalized, file)
+            });
+        if referenced {
+            out.push((doc.slice_id.clone(), doc.description.clone()));
+        }
+    }
+    Ok(out)
+}
+
 pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let owners = owners_for_path(&docs, path, ctx);
     if json {
+        // JSON contract unchanged: `files:` owners only (verification fallback is human-only).
         let output = owners
             .iter()
             .map(|owner| SliceOwner {
@@ -248,11 +274,19 @@ pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
         return Ok(0);
     }
     if owners.is_empty() {
-        eprintln!(
-            "no owning slice for: {}",
-            crate::paths::normalize_repo_path(path, ctx)
-        );
-        return Ok(1);
+        let normalized = crate::paths::normalize_repo_path(path, ctx);
+        let associations = verification_associations(ctx, path)?;
+        if associations.is_empty() {
+            eprintln!(
+                "no slice association for: {normalized} (checked files and verification links)"
+            );
+            return Ok(1);
+        }
+        // Third tab-field keeps the slice_id<TAB>description contract clean.
+        for (slice_id, description) in associations {
+            println!("{slice_id}\t{description}\t(via verification: {normalized})");
+        }
+        return Ok(0);
     }
     for owner in owners {
         println!("{}\t{}", owner.slice_id, owner.description);
@@ -351,6 +385,10 @@ pub fn affected_docs(ctx: &Context, paths: &[String], json: bool) -> Result<i32>
     Ok(i32::from(any_stale))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single resolve→render path; splitting the borrow-coupled fragments hurts readability"
+)]
 pub fn context(
     ctx: &Context,
     selector: &str,
@@ -373,16 +411,33 @@ pub fn context(
     };
 
     let mut targets = owners_for_path(&docs, selector, ctx);
+    let mut via_verification = false;
     if targets.is_empty() {
-        targets = if let Some(doc) = slice_for_selector(&docs, selector) {
-            vec![doc]
-        } else {
+        if let Some(doc) = slice_for_selector(&docs, selector) {
+            targets = vec![doc];
+        } else if json {
+            // JSON contract unchanged: no verification fallback on the machine path.
             eprintln!(
                 "no owning slice for: {}",
                 crate::paths::normalize_repo_path(selector, ctx)
             );
             return Ok(1);
-        };
+        } else {
+            // Human-only fallback: resolve a test file to the slice(s) that reference it.
+            let ids: Vec<String> = verification_associations(ctx, selector)?
+                .into_iter()
+                .map(|(slice_id, _)| slice_id)
+                .collect();
+            targets = docs.iter().filter(|d| ids.contains(&d.slice_id)).collect();
+            if targets.is_empty() {
+                eprintln!(
+                    "no slice association for: {} (checked files and verification links)",
+                    crate::paths::normalize_repo_path(selector, ctx)
+                );
+                return Ok(1);
+            }
+            via_verification = true;
+        }
     } else if targets.len() > 1 && ambiguity == Ambiguity::Strict {
         targets.sort_by(|a, b| a.slice_id.cmp(&b.slice_id));
         let ids = targets
@@ -433,6 +488,12 @@ pub fn context(
         for doc in targets {
             println!("slice: {}", doc.slice_id);
             println!("description: {}", doc.description);
+            if via_verification {
+                println!(
+                    "association: via verification ({})",
+                    crate::paths::normalize_repo_path(selector, ctx)
+                );
+            }
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));

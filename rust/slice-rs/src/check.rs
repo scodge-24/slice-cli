@@ -404,7 +404,7 @@ fn doc_manifest_checks(
     Ok(())
 }
 
-fn parse_verification(body: &str) -> Vec<(String, Vec<String>)> {
+pub(crate) fn parse_verification(body: &str) -> Vec<(String, Vec<String>)> {
     let section = section_text(body, "Verification");
     let mut links = Vec::new();
     for line in section.lines() {

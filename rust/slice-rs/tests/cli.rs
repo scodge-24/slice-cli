@@ -464,6 +464,36 @@ fn show_annotates_abstraction_locations_in_human_output_only() {
 }
 
 #[test]
+fn for_resolves_test_files_via_verification_links() {
+    // tests/test_auth.py is a Verification target of auth-service (not a files: owner).
+    let human = run_rust_raw(&["for", "tests/test_auth.py"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(
+        text.contains("auth-service") && text.contains("via verification"),
+        "expected verification association, got: {text}"
+    );
+
+    // JSON contract unchanged: a non-owned test file yields [] (fallback is human-only).
+    let json = run_rust(&["for", "tests/test_auth.py", "--json"]);
+    assert_eq!(json.1.as_array().unwrap().len(), 0);
+
+    // A genuinely unreferenced path reports the new, richer message.
+    let none = run_rust_raw(&["for", "src/nowhere_xyz.py"]);
+    assert_eq!(none.0, 1);
+    assert!(stderr_text(&none).contains("no slice association"));
+
+    // owners_for_path is untouched, so affected-docs/staleness do not attribute the test file to a
+    // slice's docs.
+    let affected = run_rust_raw(&["affected-docs", "tests/test_auth.py"]);
+    assert!(
+        !stdout_text(&affected).contains("auth-guide"),
+        "a test file must not affect a slice's docs: {}",
+        stdout_text(&affected)
+    );
+}
+
+#[test]
 fn native_write_commands_have_expected_observable_behavior() {
     let temp = fixture_repo();
     let repo = temp.path();
@@ -1250,7 +1280,7 @@ fn p2_command_edges_are_covered() {
 
     let no_owner = run_rust_raw_for_repo(repo, &["context", "src/no-owner.py"]);
     assert_eq!(no_owner.0, 1);
-    assert!(stderr_text(&no_owner).contains("no owning slice"));
+    assert!(stderr_text(&no_owner).contains("no slice association"));
 
     let missing_sections = run_rust_for_repo(repo, &["context", "auth-service", "--json"]);
     assert_eq!(missing_sections.0, 0);

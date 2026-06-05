@@ -193,14 +193,23 @@ fn py_span_from_def(lines: &[&str], d: usize) -> Option<Symbol> {
 
 // --- Brace languages (conservative) ---------------------------------------------------------
 
-fn line_has_string_or_comment(line: &str) -> bool {
+/// True when a `{`/`}` on this line might be hidden inside a string, char literal, or comment —
+/// which would corrupt brace-depth counting. A line with no brace is never a hazard, so string or
+/// comment markers on braceless lines don't suppress annotation. Single quotes count only as
+/// `'{'`/`'}'` (a char literal holding a brace); a bare `'` is ignored so Rust lifetimes (`&'a T`)
+/// and ordinary char literals don't reject the whole span.
+fn brace_may_be_hidden(line: &str) -> bool {
+    if !line.contains('{') && !line.contains('}') {
+        return false;
+    }
     line.contains('"')
-        || line.contains('\'')
         || line.contains('`')
         || line.contains("//")
         || line.contains("/*")
         || line.contains("*/")
         || line.contains('#')
+        || line.contains("'{'")
+        || line.contains("'}'")
 }
 
 const BRACE_KEYWORDS: [&str; 8] = [
@@ -241,8 +250,8 @@ fn brace_span_from_def(lines: &[&str], d: usize) -> Option<Symbol> {
     let mut depth = 0i32;
     let mut started = false;
     for (i, line) in lines.iter().enumerate().skip(d) {
-        if line_has_string_or_comment(line) {
-            return None; // a brace could be inside a string/comment → ambiguous
+        if brace_may_be_hidden(line) {
+            return None; // a brace could be inside a string/char/comment → ambiguous
         }
         for ch in line.chars() {
             if ch == '{' {
@@ -264,15 +273,16 @@ fn brace_span_from_def(lines: &[&str], d: usize) -> Option<Symbol> {
 }
 
 fn brace_enclosing(lines: &[&str], target0: usize) -> Option<Symbol> {
+    let target1 = target0 + 1;
+    // Scan backward for the nearest preceding definition whose span actually encloses the target.
+    // A def that fails to parse, or whose span ends before the target (e.g. a nested function the
+    // target sits *after*), is skipped so the search keeps climbing toward the real encloser.
     for d in (0..=target0).rev() {
-        if brace_def_name(lines[d]).is_some() {
-            let sym = brace_span_from_def(lines, d)?;
-            // Only valid if the matched span actually contains the target line (1-based).
-            let target1 = target0 + 1;
-            if (sym.start..=sym.end).contains(&target1) {
-                return Some(sym);
-            }
-            return None;
+        if brace_def_name(lines[d]).is_some()
+            && let Some(sym) = brace_span_from_def(lines, d)
+            && (sym.start..=sym.end).contains(&target1)
+        {
+            return Some(sym);
         }
     }
     None
@@ -359,6 +369,34 @@ class C:
         // a `}` inside a string literal would corrupt depth counting → reject the whole thing.
         let src = "fn f() {\n    let s = \"}\";\n    g();\n}\n";
         assert_eq!(enclosing_span(src, 3, Lang::Brace), None);
+    }
+
+    #[test]
+    fn brace_climbs_to_outer_after_nested_fn() {
+        // line 5 (`let x = 1;`) sits in `outer` (1-6), *after* the nested `inner` (2-4) — the
+        // search must climb past inner instead of giving up (regression: early `return None`).
+        let src = "fn outer() {\n    fn inner() {\n        work();\n    }\n    let x = 1;\n}\n";
+        let s = enclosing_span(src, 5, Lang::Brace).unwrap();
+        assert_eq!((s.name.as_str(), s.start, s.end), ("outer", 1, 6));
+        // a line inside the nested fn still resolves to the nested fn.
+        assert_eq!(enclosing_span(src, 3, Lang::Brace).unwrap().name, "inner");
+    }
+
+    #[test]
+    fn brace_rust_lifetime_on_def_line_is_ok() {
+        // a `'a` lifetime on the def line must not be mistaken for a brace-hiding char literal.
+        let src = "fn parse<'a>(input: &'a str) {\n    let x = 1;\n    work(x);\n}\n";
+        let s = enclosing_span(src, 2, Lang::Brace).unwrap();
+        assert_eq!((s.name.as_str(), s.start, s.end), ("parse", 1, 4));
+    }
+
+    #[test]
+    fn brace_braceless_string_line_does_not_suppress() {
+        // a string on a *braceless* body line can't corrupt depth counting, so it must not reject
+        // the whole span.
+        let src = "fn greet() {\n    let msg = \"hello world\";\n    print(msg);\n}\n";
+        let s = enclosing_span(src, 3, Lang::Brace).unwrap();
+        assert_eq!((s.name.as_str(), s.start, s.end), ("greet", 1, 4));
     }
 
     #[test]

@@ -441,6 +441,29 @@ fn grep_symbols_annotates_enclosing_span_opt_in() {
 }
 
 #[test]
+fn show_annotates_abstraction_locations_in_human_output_only() {
+    // verify_token is defined once in middleware.py → its def site is appended to the human render.
+    let human = run_rust_raw(&["show", "auth-service"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(
+        text.contains("verify_token"),
+        "abstractions missing: {text}"
+    );
+    assert!(
+        text.contains("(src/auth/middleware.py:"),
+        "expected a (path:line) annotation: {text}"
+    );
+
+    // The JSON contract is unchanged — no location leaks into machine output.
+    let json = run_rust(&["show", "auth-service", "--json"]);
+    assert!(
+        !json.1.to_string().contains("middleware.py:"),
+        "json must not carry abstraction locations"
+    );
+}
+
+#[test]
 fn native_write_commands_have_expected_observable_behavior() {
     let temp = fixture_repo();
     let repo = temp.path();

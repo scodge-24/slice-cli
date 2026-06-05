@@ -472,7 +472,7 @@ fn section_text(body: &str, name: &str) -> String {
     }
 }
 
-fn normalize_abstraction(raw: &str) -> String {
+pub(crate) fn normalize_abstraction(raw: &str) -> String {
     let mut name = raw.trim().trim_matches('`');
     if let Some((head, _)) = name.split_once('—') {
         name = head;

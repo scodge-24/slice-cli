@@ -172,7 +172,7 @@ pub fn show(
         println!("{} {}", key("doc_path:"), ctx.rel(&doc.doc_path));
         print_list_colored("files", &doc.files, styles, None);
         print_list_colored("dependencies", &doc.dependencies, styles, Some(styles.dep));
-        print_list_colored("abstractions", &doc.abstractions, styles, None);
+        print_abstractions(ctx, &doc.files, &doc.abstractions, styles);
         print_list_colored("exclusions", &doc.exclusions, styles, None);
         print_tracked_docs("docs", &linked_docs, styles, &stale_ids);
     }
@@ -1782,6 +1782,55 @@ pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     serde_json::to_writer_pretty(&mut lock, value)?;
     writeln!(&mut lock)?;
     Ok(())
+}
+
+/// Resolve an abstraction to `path:line` of its definition, or `None` when it can't be pinned
+/// unambiguously. Searches the slice's files; requires the symbol to be defined in exactly one of
+/// them (a duplicate or no definition → no location, never a guess). Reuses `normalize_abstraction`
+/// so the name is parsed the same way `check` does.
+fn abstraction_location(ctx: &Context, files: &[String], abstraction: &str) -> Option<String> {
+    let name = crate::check::normalize_abstraction(abstraction);
+    if name.is_empty() {
+        return None;
+    }
+    let mut hit: Option<String> = None;
+    for pattern in files {
+        for rel in expand_literal_or_existing(pattern, ctx) {
+            let Some(lang) = crate::symbols::lang_for_path(&rel) else {
+                continue;
+            };
+            let Ok(content) = std::fs::read_to_string(repo_join(ctx, &rel)) else {
+                continue;
+            };
+            if let Some((start, _)) = crate::symbols::definition_span(&content, &name, lang) {
+                if hit.is_some() {
+                    return None; // defined in more than one file → ambiguous
+                }
+                hit = Some(format!("{rel}:{start}"));
+            }
+        }
+    }
+    hit
+}
+
+/// `abstractions:` block for `show`/`context`, with each item's definition site appended as a dim
+/// `(path:line)` when it resolves unambiguously (human output only — no JSON field).
+fn print_abstractions(ctx: &Context, files: &[String], abstractions: &[String], styles: &Styles) {
+    let label = styles.paint(styles.dim, "abstractions:");
+    if abstractions.is_empty() {
+        println!("{label} (none)");
+        return;
+    }
+    println!("{label}");
+    for value in abstractions {
+        match abstraction_location(ctx, files, value) {
+            Some(loc) => println!(
+                "  - {value}  {}",
+                styles.paint(styles.dim, &format!("({loc})"))
+            ),
+            None => println!("  - {value}"),
+        }
+    }
 }
 
 fn print_list_colored(

@@ -547,14 +547,28 @@ pub fn context(
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));
-            // Affordance (principle P): advertise the blast radius factually so the agent pulls it in
-            // instead of falling back to brute-force grep (FINDINGS failure mode #2). Human output
-            // only — the JSON contract (ContextOutput) stays byte-identical.
+            // Affordance (principle P): advertise BOTH dependency directions factually so the agent
+            // pulls in distributed collaborators instead of brute-force grep (FINDINGS failure mode
+            // #2). Two directions because retrieval and change-impact pull opposite ways: forward
+            // deps are the code THIS slice relies on (often where distributed gold lives — the
+            // xarray-2905 confound); reverse deps are what relies on this slice (change-impact /
+            // blast radius). Human output only — the JSON contract (ContextOutput) stays byte-identical.
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            let forward = transitive_deps(&doc.slice_id, &docs);
+            if !forward.is_empty() {
+                let n_files = collaborator_files(&forward, &docs).len();
+                let n_slices = forward.len();
+                println!(
+                    "depends-on: {n_files} file{} in {n_slices} slice{} this relies on — slice deps {} --transitive --files",
+                    plural(n_files),
+                    plural(n_slices),
+                    doc.slice_id
+                );
+            }
             let blast = transitive_reverse_deps(&doc.slice_id, &docs);
             if !blast.is_empty() {
                 let n_files = collaborator_files(&blast, &docs).len();
                 let n_slices = blast.len();
-                let plural = |n: usize| if n == 1 { "" } else { "s" };
                 println!(
                     "blast-radius: {n_files} file{} in {n_slices} reverse-dep slice{} — slice deps {} --reverse --transitive --files",
                     plural(n_files),

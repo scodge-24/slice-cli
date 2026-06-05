@@ -825,44 +825,69 @@ fn deps_files_lists_blast_radius_deduped_ordered_and_additive() {
 }
 
 #[test]
-fn context_human_advertises_blast_radius_but_json_is_unchanged() {
+fn context_human_advertises_both_dependency_directions_but_json_is_unchanged() {
     let temp = chain_fixture();
     let repo = temp.path();
 
-    // Human context for chain-a advertises its blast radius factually (affordance, principle P).
-    let human = run_rust_raw_for_repo(repo, &["context", "src/chain_a.rs"]);
-    assert_eq!(human.0, 0);
+    // chain-a is the dependency ROOT (depends on nothing) but has the widest blast radius. Its
+    // context advertises the reverse direction (blast-radius) and omits the forward one (depends-on).
+    let root = run_rust_raw_for_repo(repo, &["context", "src/chain_a.rs"]);
+    assert_eq!(root.0, 0);
     assert!(
-        stdout_text(&human).contains(
+        stdout_text(&root).contains(
             "blast-radius: 2 files in 2 reverse-dep slices — slice deps chain-a --reverse --transitive --files"
         ),
-        "context human output should advertise the blast radius; got:\n{}",
-        stdout_text(&human)
+        "root slice should advertise its blast radius; got:\n{}",
+        stdout_text(&root)
+    );
+    assert!(
+        !stdout_text(&root).contains("depends-on:"),
+        "no depends-on line when the forward deps are empty (chain-a is the root)"
     );
 
-    // The JSON contract is unchanged — no blast-radius leaks into ContextOutput.
+    // chain-c is the dependency TIP (nothing depends on it) but relies on the whole chain. Its
+    // context advertises the forward direction (depends-on) and omits the reverse one (blast-radius).
+    // This is the direction the xarray-2905 confound needed: distributed gold living in a forward dep.
+    let tip = run_rust_raw_for_repo(repo, &["context", "src/chain_c.rs"]);
+    assert_eq!(tip.0, 0);
+    assert!(
+        stdout_text(&tip).contains(
+            "depends-on: 2 files in 2 slices this relies on — slice deps chain-c --transitive --files"
+        ),
+        "tip slice should advertise its forward dependencies; got:\n{}",
+        stdout_text(&tip)
+    );
+    assert!(
+        !stdout_text(&tip).contains("blast-radius:"),
+        "no blast-radius line when the reverse deps are empty (chain-c is the tip)"
+    );
+
+    // The JSON contract is unchanged — neither affordance line leaks into ContextOutput.
     let machine = run_rust_for_repo(repo, &["context", "src/chain_a.rs", "--json"]);
     assert_eq!(machine.0, 0);
+    let machine_txt = machine.1.to_string();
     assert!(
-        !machine.1.to_string().contains("blast-radius"),
+        !machine_txt.contains("blast-radius") && !machine_txt.contains("depends-on"),
         "context JSON must stay byte-identical"
     );
 
-    // A leaf slice (nothing depends on it) omits the line entirely.
-    let leaf = run_rust_raw_for_repo(repo, &["context", "src/chain_c.rs"]);
-    assert_eq!(leaf.0, 0);
+    // chain-b sits in the middle: exactly one forward dep (chain-a) and one reverse dep (chain-c),
+    // so it exercises BOTH lines and singular grammar in a single context call.
+    let mid = run_rust_raw_for_repo(repo, &["context", "src/chain_b.rs"]);
+    assert_eq!(mid.0, 0);
     assert!(
-        !stdout_text(&leaf).contains("blast-radius:"),
-        "no blast-radius line when the radius is empty"
+        stdout_text(&mid).contains(
+            "depends-on: 1 file in 1 slice this relies on — slice deps chain-b --transitive --files"
+        ),
+        "singular forward affordance for a one-file, one-slice dependency; got:\n{}",
+        stdout_text(&mid)
     );
-
-    // Singular grammar: chain-b's blast radius is a single slice (chain-c) owning a single file.
-    let one = run_rust_raw_for_repo(repo, &["context", "src/chain_b.rs"]);
-    assert_eq!(one.0, 0);
     assert!(
-        stdout_text(&one).contains("blast-radius: 1 file in 1 reverse-dep slice — "),
-        "singular 'file'/'slice' for a one-file, one-slice radius; got:\n{}",
-        stdout_text(&one)
+        stdout_text(&mid).contains(
+            "blast-radius: 1 file in 1 reverse-dep slice — slice deps chain-b --reverse --transitive --files"
+        ),
+        "singular reverse affordance for a one-file, one-slice radius; got:\n{}",
+        stdout_text(&mid)
     );
 }
 

@@ -302,6 +302,29 @@ fn read_only_json_outputs_are_native_snapshots() {
 }
 
 #[test]
+fn find_matches_multiple_terms() {
+    // Multi-term query: every term must hit some field. Both words live in auth-service's
+    // description ("Authentication and session management").
+    let multi = run_rust(&["find", "authentication management", "--json"]);
+    assert_eq!(multi.0, 0);
+    assert_eq!(multi.1[0]["slice_id"], "auth-service");
+
+    // A term that hits nothing anywhere fails the whole query and is named in the message.
+    let unmatched = run_rust_raw(&["find", "authentication zzzznope"]);
+    assert_eq!(unmatched.0, 1);
+    assert!(
+        stderr_text(&unmatched).contains("unmatched: zzzznope"),
+        "stderr: {}",
+        stderr_text(&unmatched)
+    );
+
+    // Empty needle preserves the prior match-all behavior (every slice in the mock repo).
+    let all = run_rust(&["find", "", "--json"]);
+    assert_eq!(all.0, 0);
+    assert_eq!(all.1.as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn affected_docs_for_legacy_manifest_shape() {
     let args = ["affected-docs", "src/auth/middleware.py", "--json"];
     assert_eq!(

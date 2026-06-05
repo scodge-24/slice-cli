@@ -455,6 +455,24 @@ pub fn find(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<
         return Ok(i32::from(matches.is_empty()));
     }
     if matches.is_empty() {
+        // For a multi-term query, surface which term(s) hit nothing anywhere so the caller knows
+        // what to drop, instead of a blind "no matches". A term is globally absent iff finding it
+        // alone yields nothing.
+        let terms: Vec<&str> = needle.split_whitespace().collect();
+        if terms.len() > 1 {
+            let unmatched: Vec<&str> = terms
+                .iter()
+                .copied()
+                .filter(|term| find_matches(&docs, &manifest.docs, term).is_empty())
+                .collect();
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "no matches for: {needle} (unmatched: {})",
+                    unmatched.join(", ")
+                );
+                return Ok(1);
+            }
+        }
         eprintln!("no matches for: {needle}");
         return Ok(1);
     }
@@ -1398,7 +1416,20 @@ fn find_matches<'a>(
     tracked_docs: &[crate::models::TrackedDoc],
     needle: &str,
 ) -> Vec<FindMatch<'a>> {
-    let text = needle.to_lowercase();
+    // Split the needle into whitespace-separated terms and require EVERY term to hit some field
+    // (per-term AND across fields), instead of matching the whole needle as one literal substring.
+    // That lets natural-language queries like "Variable setitem values" match. An empty/whitespace
+    // needle yields a single empty term, which is contained in every field — preserving the prior
+    // match-all behavior. Quoted phrases do not combine; whitespace always splits.
+    let mut terms: Vec<String> = needle
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if terms.is_empty() {
+        terms.push(String::new());
+    }
+
     let mut tags_by_slice = FxHashMap::<&str, Vec<&str>>::default();
     for tracked in tracked_docs {
         for sid in &tracked.slices {
@@ -1409,47 +1440,66 @@ fn find_matches<'a>(
 
     let mut rows = Vec::new();
     for doc in docs {
-        let mut fields = Vec::new();
-        if doc.slice_id.to_lowercase().contains(&text) {
-            fields.push("slice_id");
-        }
-        if doc.description.to_lowercase().contains(&text) {
-            fields.push("description");
-        }
-        if doc
-            .files
-            .iter()
-            .any(|file| file.to_lowercase().contains(&text))
-        {
-            fields.push("files");
-        }
-        if doc
-            .abstractions
-            .iter()
-            .any(|abstraction| abstraction.to_lowercase().contains(&text))
-        {
-            fields.push("abstractions");
-        }
-        if doc
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.to_lowercase().contains(&text))
-        {
-            fields.push("dependencies");
-        }
-        if tags_by_slice
+        // Lower-case each field ONCE per doc (not once per term) so an N-term query over a large
+        // body doesn't re-allocate it N times.
+        let id_l = doc.slice_id.to_lowercase();
+        let desc_l = doc.description.to_lowercase();
+        let files_l: Vec<String> = doc.files.iter().map(|s| s.to_lowercase()).collect();
+        let abs_l: Vec<String> = doc.abstractions.iter().map(|s| s.to_lowercase()).collect();
+        let deps_l: Vec<String> = doc.dependencies.iter().map(|s| s.to_lowercase()).collect();
+        let tags_l: Vec<String> = tags_by_slice
             .get(doc.slice_id.as_str())
-            .is_some_and(|tags| tags.iter().any(|tag| tag.to_lowercase().contains(&text)))
-        {
-            fields.push("doc_tags");
+            .map(|tags| tags.iter().map(|t| t.to_lowercase()).collect())
+            .unwrap_or_default();
+        let body_l = doc.body.to_lowercase();
+
+        // Field order here is the public output order; keep it stable. Each field name is recorded
+        // at most once even across multiple terms (dedup-preserving-order below).
+        let mut fields: Vec<&str> = Vec::new();
+        let mut all_terms_hit = true;
+        for term in &terms {
+            let checks: [(bool, &'static str); 7] = [
+                (id_l.contains(term), "slice_id"),
+                (desc_l.contains(term), "description"),
+                (files_l.iter().any(|f| f.contains(term)), "files"),
+                (abs_l.iter().any(|a| a.contains(term)), "abstractions"),
+                (deps_l.iter().any(|d| d.contains(term)), "dependencies"),
+                (tags_l.iter().any(|t| t.contains(term)), "doc_tags"),
+                (body_l.contains(term), "body"),
+            ];
+            let mut term_hit = false;
+            for (present, name) in checks {
+                if present {
+                    term_hit = true;
+                    if !fields.contains(&name) {
+                        fields.push(name);
+                    }
+                }
+            }
+            if !term_hit {
+                all_terms_hit = false;
+                break;
+            }
         }
-        if doc.body.to_lowercase().contains(&text) {
-            fields.push("body");
-        }
-        if !fields.is_empty() {
+        if all_terms_hit && !fields.is_empty() {
+            // Re-emit fields in the canonical order (closure pushes in first-hit order, which for a
+            // single term already equals canonical order; this normalizes the multi-term case).
+            let order = [
+                "slice_id",
+                "description",
+                "files",
+                "abstractions",
+                "dependencies",
+                "doc_tags",
+                "body",
+            ];
+            let matches: Vec<&str> = order
+                .into_iter()
+                .filter(|name| fields.contains(name))
+                .collect();
             rows.push(FindMatch {
                 description: &doc.description,
-                matches: fields,
+                matches,
                 slice_id: &doc.slice_id,
             });
         }

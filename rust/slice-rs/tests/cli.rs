@@ -302,6 +302,29 @@ fn read_only_json_outputs_are_native_snapshots() {
 }
 
 #[test]
+fn find_matches_multiple_terms() {
+    // Multi-term query: every term must hit some field. Both words live in auth-service's
+    // description ("Authentication and session management").
+    let multi = run_rust(&["find", "authentication management", "--json"]);
+    assert_eq!(multi.0, 0);
+    assert_eq!(multi.1[0]["slice_id"], "auth-service");
+
+    // A term that hits nothing anywhere fails the whole query and is named in the message.
+    let unmatched = run_rust_raw(&["find", "authentication zzzznope"]);
+    assert_eq!(unmatched.0, 1);
+    assert!(
+        stderr_text(&unmatched).contains("unmatched: zzzznope"),
+        "stderr: {}",
+        stderr_text(&unmatched)
+    );
+
+    // Empty needle preserves the prior match-all behavior (every slice in the mock repo).
+    let all = run_rust(&["find", "", "--json"]);
+    assert_eq!(all.0, 0);
+    assert_eq!(all.1.as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn affected_docs_for_legacy_manifest_shape() {
     let args = ["affected-docs", "src/auth/middleware.py", "--json"];
     assert_eq!(
@@ -378,6 +401,96 @@ fn subprocess_commands_are_native_snapshots() {
     let grep = run_rust_raw(&["grep", "auth-service", "verify_token"]);
     assert_eq!(grep.0, 0);
     assert!(stdout_text(&grep).contains("src/auth/middleware.py"));
+}
+
+#[test]
+fn grep_symbols_annotates_enclosing_span_opt_in() {
+    // Opt-in --symbols appends a heuristic [span Name start-end approx] suffix for a clean
+    // top-level def (verify_token in middleware.py).
+    let with = run_rust_raw(&["grep", "auth-service", "def verify_token", "--symbols"]);
+    assert_eq!(with.0, 0);
+    let text = stdout_text(&with);
+    assert!(
+        text.contains("[span verify_token") && text.contains("approx]"),
+        "expected a span annotation, got: {text}"
+    );
+
+    // Default mode is unchanged — never annotates.
+    let without = run_rust_raw(&["grep", "auth-service", "def verify_token"]);
+    assert!(!stdout_text(&without).contains("[span"));
+
+    // A decorated def is ambiguous (api-handlers get_user is preceded by @require_auth) → left
+    // unannotated rather than mis-spanned.
+    let decorated = run_rust_raw(&["grep", "api-handlers", "def get_user", "--symbols"]);
+    assert_eq!(decorated.0, 0);
+    assert!(
+        !stdout_text(&decorated).contains("[span"),
+        "decorated def must not be annotated: {}",
+        stdout_text(&decorated)
+    );
+
+    // No-match preserves rg's exit code 1 in both modes.
+    assert_eq!(
+        run_rust_raw(&["grep", "auth-service", "zzz_nomatch_zzz"]).0,
+        1
+    );
+    assert_eq!(
+        run_rust_raw(&["grep", "auth-service", "zzz_nomatch_zzz", "--symbols"]).0,
+        1
+    );
+}
+
+#[test]
+fn show_annotates_abstraction_locations_in_human_output_only() {
+    // verify_token is defined once in middleware.py → its def site is appended to the human render.
+    let human = run_rust_raw(&["show", "auth-service"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(
+        text.contains("verify_token"),
+        "abstractions missing: {text}"
+    );
+    assert!(
+        text.contains("(src/auth/middleware.py:"),
+        "expected a (path:line) annotation: {text}"
+    );
+
+    // The JSON contract is unchanged — no location leaks into machine output.
+    let json = run_rust(&["show", "auth-service", "--json"]);
+    assert!(
+        !json.1.to_string().contains("middleware.py:"),
+        "json must not carry abstraction locations"
+    );
+}
+
+#[test]
+fn for_resolves_test_files_via_verification_links() {
+    // tests/test_auth.py is a Verification target of auth-service (not a files: owner).
+    let human = run_rust_raw(&["for", "tests/test_auth.py"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(
+        text.contains("auth-service") && text.contains("via verification"),
+        "expected verification association, got: {text}"
+    );
+
+    // JSON contract unchanged: a non-owned test file yields [] (fallback is human-only).
+    let json = run_rust(&["for", "tests/test_auth.py", "--json"]);
+    assert_eq!(json.1.as_array().unwrap().len(), 0);
+
+    // A genuinely unreferenced path reports the new, richer message.
+    let none = run_rust_raw(&["for", "src/nowhere_xyz.py"]);
+    assert_eq!(none.0, 1);
+    assert!(stderr_text(&none).contains("no slice association"));
+
+    // owners_for_path is untouched, so affected-docs/staleness do not attribute the test file to a
+    // slice's docs.
+    let affected = run_rust_raw(&["affected-docs", "tests/test_auth.py"]);
+    assert!(
+        !stdout_text(&affected).contains("auth-guide"),
+        "a test file must not affect a slice's docs: {}",
+        stdout_text(&affected)
+    );
 }
 
 #[test]
@@ -1167,7 +1280,7 @@ fn p2_command_edges_are_covered() {
 
     let no_owner = run_rust_raw_for_repo(repo, &["context", "src/no-owner.py"]);
     assert_eq!(no_owner.0, 1);
-    assert!(stderr_text(&no_owner).contains("no owning slice"));
+    assert!(stderr_text(&no_owner).contains("no slice association"));
 
     let missing_sections = run_rust_for_repo(repo, &["context", "auth-service", "--json"]);
     assert_eq!(missing_sections.0, 0);

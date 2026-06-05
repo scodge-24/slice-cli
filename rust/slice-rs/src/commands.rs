@@ -172,7 +172,7 @@ pub fn show(
         println!("{} {}", key("doc_path:"), ctx.rel(&doc.doc_path));
         print_list_colored("files", &doc.files, styles, None);
         print_list_colored("dependencies", &doc.dependencies, styles, Some(styles.dep));
-        print_list_colored("abstractions", &doc.abstractions, styles, None);
+        print_abstractions(ctx, &doc.files, &doc.abstractions, styles);
         print_list_colored("exclusions", &doc.exclusions, styles, None);
         print_tracked_docs("docs", &linked_docs, styles, &stale_ids);
     }
@@ -233,10 +233,38 @@ pub fn deps(
     Ok(0)
 }
 
+/// Slices that reference `path` as a Verification target (e.g. a test file), used as a fallback for
+/// `for`/`context` when no `files:` owner matches. Returns `(slice_id, description)`. Loads full-body
+/// docs because the Verification links live in the body (the metadata loader drops it); this is a
+/// cold path, so the extra read is fine. Does NOT touch `owners_for_path`, so `affected-docs` and
+/// staleness are unaffected. Verification refs only — `exclusions:` is a disown signal, not ownership.
+fn verification_associations(ctx: &Context, path: &str) -> Result<Vec<(String, String)>> {
+    let normalized = crate::paths::normalize_repo_path(path, ctx);
+    let docs = load_slice_docs(ctx)?;
+    let mut out = Vec::new();
+    for doc in &docs {
+        let referenced = crate::check::parse_verification(&doc.body)
+            .into_iter()
+            .flat_map(|(_, refs)| refs)
+            .any(|reference| {
+                // refs look like `tests/foo.py::TestBar`; match on the file part only, normalized
+                // the same way the query path is (e.g. strip a leading `./`) so the forms line up.
+                let file = reference.split("::").next().unwrap_or(&reference).trim();
+                let file = crate::paths::normalize_repo_path(file, ctx);
+                matches_path(&normalized, &file)
+            });
+        if referenced {
+            out.push((doc.slice_id.clone(), doc.description.clone()));
+        }
+    }
+    Ok(out)
+}
+
 pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let owners = owners_for_path(&docs, path, ctx);
     if json {
+        // JSON contract unchanged: `files:` owners only (verification fallback is human-only).
         let output = owners
             .iter()
             .map(|owner| SliceOwner {
@@ -248,11 +276,19 @@ pub fn for_path(ctx: &Context, path: &str, json: bool) -> Result<i32> {
         return Ok(0);
     }
     if owners.is_empty() {
-        eprintln!(
-            "no owning slice for: {}",
-            crate::paths::normalize_repo_path(path, ctx)
-        );
-        return Ok(1);
+        let normalized = crate::paths::normalize_repo_path(path, ctx);
+        let associations = verification_associations(ctx, path)?;
+        if associations.is_empty() {
+            eprintln!(
+                "no slice association for: {normalized} (checked files and verification links)"
+            );
+            return Ok(1);
+        }
+        // Third tab-field keeps the slice_id<TAB>description contract clean.
+        for (slice_id, description) in associations {
+            println!("{slice_id}\t{description}\t(via verification: {normalized})");
+        }
+        return Ok(0);
     }
     for owner in owners {
         println!("{}\t{}", owner.slice_id, owner.description);
@@ -351,6 +387,10 @@ pub fn affected_docs(ctx: &Context, paths: &[String], json: bool) -> Result<i32>
     Ok(i32::from(any_stale))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single resolve→render path; splitting the borrow-coupled fragments hurts readability"
+)]
 pub fn context(
     ctx: &Context,
     selector: &str,
@@ -373,16 +413,33 @@ pub fn context(
     };
 
     let mut targets = owners_for_path(&docs, selector, ctx);
+    let mut via_verification = false;
     if targets.is_empty() {
-        targets = if let Some(doc) = slice_for_selector(&docs, selector) {
-            vec![doc]
-        } else {
+        if let Some(doc) = slice_for_selector(&docs, selector) {
+            targets = vec![doc];
+        } else if json {
+            // JSON contract unchanged: no verification fallback on the machine path.
             eprintln!(
                 "no owning slice for: {}",
                 crate::paths::normalize_repo_path(selector, ctx)
             );
             return Ok(1);
-        };
+        } else {
+            // Human-only fallback: resolve a test file to the slice(s) that reference it.
+            let ids: FxHashSet<String> = verification_associations(ctx, selector)?
+                .into_iter()
+                .map(|(slice_id, _)| slice_id)
+                .collect();
+            targets = docs.iter().filter(|d| ids.contains(&d.slice_id)).collect();
+            if targets.is_empty() {
+                eprintln!(
+                    "no slice association for: {} (checked files and verification links)",
+                    crate::paths::normalize_repo_path(selector, ctx)
+                );
+                return Ok(1);
+            }
+            via_verification = true;
+        }
     } else if targets.len() > 1 && ambiguity == Ambiguity::Strict {
         targets.sort_by(|a, b| a.slice_id.cmp(&b.slice_id));
         let ids = targets
@@ -433,6 +490,12 @@ pub fn context(
         for doc in targets {
             println!("slice: {}", doc.slice_id);
             println!("description: {}", doc.description);
+            if via_verification {
+                println!(
+                    "association: via verification ({})",
+                    crate::paths::normalize_repo_path(selector, ctx)
+                );
+            }
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));
@@ -455,6 +518,24 @@ pub fn find(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<
         return Ok(i32::from(matches.is_empty()));
     }
     if matches.is_empty() {
+        // For a multi-term query, surface which term(s) hit nothing anywhere so the caller knows
+        // what to drop, instead of a blind "no matches". A term is globally absent iff finding it
+        // alone yields nothing.
+        let terms: Vec<&str> = needle.split_whitespace().collect();
+        if terms.len() > 1 {
+            let unmatched: Vec<&str> = terms
+                .iter()
+                .copied()
+                .filter(|term| find_matches(&docs, &manifest.docs, term).is_empty())
+                .collect();
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "no matches for: {needle} (unmatched: {})",
+                    unmatched.join(", ")
+                );
+                return Ok(1);
+            }
+        }
         eprintln!("no matches for: {needle}");
         return Ok(1);
     }
@@ -678,12 +759,17 @@ pub fn grep(
     pattern: &str,
     ignore_case: bool,
     fixed_strings: bool,
+    symbols: bool,
 ) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
     let doc = require_slice(&docs, selector)?;
     if doc.files.is_empty() {
         eprintln!("{} has no files[]", doc.slice_id);
         return Ok(1);
+    }
+
+    if symbols {
+        return grep_with_symbols(ctx, &doc.files, pattern, ignore_case, fixed_strings);
     }
 
     let mut command = Command::new("rg");
@@ -711,6 +797,92 @@ pub fn grep(
         }
         Err(err) => Err(Error::Io(err)),
     }
+}
+
+/// `grep --symbols`: run `rg --json` so the path + line number come structurally (no fragile
+/// `path:line:text` re-parse), then append a stable, uncolored `\t[span <Name> <start>-<end> approx]`
+/// suffix naming the enclosing function/class. Unresolved/ambiguous hits are emitted bare. rg's exit
+/// code (0 match / 1 none / 2 error) and stderr are preserved.
+fn grep_with_symbols(
+    ctx: &Context,
+    files: &[String],
+    pattern: &str,
+    ignore_case: bool,
+    fixed_strings: bool,
+) -> Result<i32> {
+    let mut command = Command::new("rg");
+    command.arg("--json");
+    if ignore_case {
+        command.arg("-i");
+    }
+    if fixed_strings {
+        command.arg("-F");
+    }
+    command.arg(pattern);
+    for slice_pattern in files {
+        let expanded = expand_literal_or_existing(slice_pattern, ctx);
+        if expanded.is_empty() {
+            command.arg(slice_pattern);
+        } else {
+            command.args(expanded);
+        }
+    }
+    let output = match command.current_dir(ctx.repo_root()).output() {
+        Ok(out) => out,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("rg is required for `slice grep`");
+            return Ok(2);
+        }
+        Err(err) => return Err(Error::Io(err)),
+    };
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let mut file_cache: FxHashMap<String, Option<String>> = FxHashMap::default();
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+            continue;
+        }
+        let data = &event["data"];
+        let Some(path) = data["path"]["text"].as_str() else {
+            continue; // non-UTF8 path: skip rather than emit a malformed line
+        };
+        let lineno = usize::try_from(data["line_number"].as_u64().unwrap_or(0)).unwrap_or(0);
+        let text = data["lines"]["text"].as_str().unwrap_or_default();
+        let text = text.trim_end_matches(['\n', '\r']);
+
+        // Resolve the optional enclosing-span annotation (each file read once, cached).
+        let span = crate::symbols::lang_for_path(path).and_then(|lang| {
+            let content = file_cache
+                .entry(path.to_owned())
+                .or_insert_with(|| std::fs::read_to_string(ctx.repo_root().join(path)).ok());
+            content
+                .as_ref()
+                .and_then(|c| crate::symbols::enclosing_span(c, lineno, lang))
+        });
+        let written = match &span {
+            Some(sym) => writeln!(
+                lock,
+                "{path}:{lineno}:{text}\t[span {} {}-{} approx]",
+                sym.name, sym.start, sym.end
+            ),
+            None => writeln!(lock, "{path}:{lineno}:{text}"),
+        };
+        // A closed consumer (e.g. `slice grep --symbols … | head`) is a normal early exit, not a
+        // CLI error — mirror rg's graceful handling instead of bubbling BrokenPipe up as exit 2.
+        match written {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(output.status.code().unwrap_or(1))
 }
 
 pub fn docs(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
@@ -1398,7 +1570,20 @@ fn find_matches<'a>(
     tracked_docs: &[crate::models::TrackedDoc],
     needle: &str,
 ) -> Vec<FindMatch<'a>> {
-    let text = needle.to_lowercase();
+    // Split the needle into whitespace-separated terms and require EVERY term to hit some field
+    // (per-term AND across fields), instead of matching the whole needle as one literal substring.
+    // That lets natural-language queries like "Variable setitem values" match. An empty/whitespace
+    // needle yields a single empty term, which is contained in every field — preserving the prior
+    // match-all behavior. Quoted phrases do not combine; whitespace always splits.
+    let mut terms: Vec<String> = needle
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if terms.is_empty() {
+        terms.push(String::new());
+    }
+
     let mut tags_by_slice = FxHashMap::<&str, Vec<&str>>::default();
     for tracked in tracked_docs {
         for sid in &tracked.slices {
@@ -1409,47 +1594,66 @@ fn find_matches<'a>(
 
     let mut rows = Vec::new();
     for doc in docs {
-        let mut fields = Vec::new();
-        if doc.slice_id.to_lowercase().contains(&text) {
-            fields.push("slice_id");
-        }
-        if doc.description.to_lowercase().contains(&text) {
-            fields.push("description");
-        }
-        if doc
-            .files
-            .iter()
-            .any(|file| file.to_lowercase().contains(&text))
-        {
-            fields.push("files");
-        }
-        if doc
-            .abstractions
-            .iter()
-            .any(|abstraction| abstraction.to_lowercase().contains(&text))
-        {
-            fields.push("abstractions");
-        }
-        if doc
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.to_lowercase().contains(&text))
-        {
-            fields.push("dependencies");
-        }
-        if tags_by_slice
+        // Lower-case each field ONCE per doc (not once per term) so an N-term query over a large
+        // body doesn't re-allocate it N times.
+        let id_l = doc.slice_id.to_lowercase();
+        let desc_l = doc.description.to_lowercase();
+        let files_l: Vec<String> = doc.files.iter().map(|s| s.to_lowercase()).collect();
+        let abs_l: Vec<String> = doc.abstractions.iter().map(|s| s.to_lowercase()).collect();
+        let deps_l: Vec<String> = doc.dependencies.iter().map(|s| s.to_lowercase()).collect();
+        let tags_l: Vec<String> = tags_by_slice
             .get(doc.slice_id.as_str())
-            .is_some_and(|tags| tags.iter().any(|tag| tag.to_lowercase().contains(&text)))
-        {
-            fields.push("doc_tags");
+            .map(|tags| tags.iter().map(|t| t.to_lowercase()).collect())
+            .unwrap_or_default();
+        let body_l = doc.body.to_lowercase();
+
+        // Field order here is the public output order; keep it stable. Each field name is recorded
+        // at most once even across multiple terms (dedup-preserving-order below).
+        let mut fields: Vec<&str> = Vec::new();
+        let mut all_terms_hit = true;
+        for term in &terms {
+            let checks: [(bool, &'static str); 7] = [
+                (id_l.contains(term), "slice_id"),
+                (desc_l.contains(term), "description"),
+                (files_l.iter().any(|f| f.contains(term)), "files"),
+                (abs_l.iter().any(|a| a.contains(term)), "abstractions"),
+                (deps_l.iter().any(|d| d.contains(term)), "dependencies"),
+                (tags_l.iter().any(|t| t.contains(term)), "doc_tags"),
+                (body_l.contains(term), "body"),
+            ];
+            let mut term_hit = false;
+            for (present, name) in checks {
+                if present {
+                    term_hit = true;
+                    if !fields.contains(&name) {
+                        fields.push(name);
+                    }
+                }
+            }
+            if !term_hit {
+                all_terms_hit = false;
+                break;
+            }
         }
-        if doc.body.to_lowercase().contains(&text) {
-            fields.push("body");
-        }
-        if !fields.is_empty() {
+        if all_terms_hit && !fields.is_empty() {
+            // Re-emit fields in the canonical order (closure pushes in first-hit order, which for a
+            // single term already equals canonical order; this normalizes the multi-term case).
+            let order = [
+                "slice_id",
+                "description",
+                "files",
+                "abstractions",
+                "dependencies",
+                "doc_tags",
+                "body",
+            ];
+            let matches: Vec<&str> = order
+                .into_iter()
+                .filter(|name| fields.contains(name))
+                .collect();
             rows.push(FindMatch {
                 description: &doc.description,
-                matches: fields,
+                matches,
                 slice_id: &doc.slice_id,
             });
         }
@@ -1649,6 +1853,73 @@ pub(crate) fn emit_json<T: Serialize>(value: &T) -> Result<()> {
     serde_json::to_writer_pretty(&mut lock, value)?;
     writeln!(&mut lock)?;
     Ok(())
+}
+
+/// A slice's source file read once: `(repo-relative path, language, contents)`.
+type SliceSource = (String, crate::symbols::Lang, String);
+
+/// Expand a slice's file patterns and read each supported source exactly once (deduped across
+/// overlapping patterns), so abstraction lookup doesn't re-read files per abstraction.
+fn read_slice_sources(ctx: &Context, files: &[String]) -> Vec<SliceSource> {
+    let mut seen = FxHashSet::default();
+    let mut out = Vec::new();
+    for pattern in files {
+        for rel in expand_literal_or_existing(pattern, ctx) {
+            if !seen.insert(rel.clone()) {
+                continue;
+            }
+            let Some(lang) = crate::symbols::lang_for_path(&rel) else {
+                continue;
+            };
+            let Ok(content) = std::fs::read_to_string(repo_join(ctx, &rel)) else {
+                continue;
+            };
+            out.push((rel, lang, content));
+        }
+    }
+    out
+}
+
+/// Resolve an abstraction to `path:line` of its definition, or `None` when it can't be pinned
+/// unambiguously. Requires the symbol to be defined in exactly one of the slice's files (a
+/// duplicate or no definition → no location, never a guess). Reuses `normalize_abstraction` so the
+/// name is parsed the same way `check` does.
+fn abstraction_location(sources: &[SliceSource], abstraction: &str) -> Option<String> {
+    let name = crate::check::normalize_abstraction(abstraction);
+    if name.is_empty() {
+        return None;
+    }
+    let mut hit: Option<String> = None;
+    for (rel, lang, content) in sources {
+        if let Some((start, _)) = crate::symbols::definition_span(content, &name, *lang) {
+            if hit.is_some() {
+                return None; // defined in more than one file → ambiguous
+            }
+            hit = Some(format!("{rel}:{start}"));
+        }
+    }
+    hit
+}
+
+/// `abstractions:` block for `show`/`context`, with each item's definition site appended as a dim
+/// `(path:line)` when it resolves unambiguously (human output only — no JSON field).
+fn print_abstractions(ctx: &Context, files: &[String], abstractions: &[String], styles: &Styles) {
+    let label = styles.paint(styles.dim, "abstractions:");
+    if abstractions.is_empty() {
+        println!("{label} (none)");
+        return;
+    }
+    println!("{label}");
+    let sources = read_slice_sources(ctx, files);
+    for value in abstractions {
+        match abstraction_location(&sources, value) {
+            Some(loc) => println!(
+                "  - {value}  {}",
+                styles.paint(styles.dim, &format!("({loc})"))
+            ),
+            None => println!("  - {value}"),
+        }
+    }
 }
 
 fn print_list_colored(

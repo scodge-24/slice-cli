@@ -404,7 +404,7 @@ fn doc_manifest_checks(
     Ok(())
 }
 
-fn parse_verification(body: &str) -> Vec<(String, Vec<String>)> {
+pub(crate) fn parse_verification(body: &str) -> Vec<(String, Vec<String>)> {
     let section = section_text(body, "Verification");
     let mut links = Vec::new();
     for line in section.lines() {
@@ -472,7 +472,7 @@ fn section_text(body: &str, name: &str) -> String {
     }
 }
 
-fn normalize_abstraction(raw: &str) -> String {
+pub(crate) fn normalize_abstraction(raw: &str) -> String {
     let mut name = raw.trim().trim_matches('`');
     if let Some((head, _)) = name.split_once('—') {
         name = head;

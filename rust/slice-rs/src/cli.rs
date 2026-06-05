@@ -122,6 +122,12 @@ enum Command {
     },
 
     /// Run rg within a slice's files.
+    #[command(
+        after_help = "With --symbols, each hit gets a trailing \\t[span <Name> <start>-<end> approx] \
+                      naming the enclosing function/class. Spans are a best-effort heuristic \
+                      (`approx`); ambiguous cases (decorators, nested functions, multi-line \
+                      signatures, tab indent) are left unannotated rather than guessed."
+    )]
     Grep {
         selector: String,
         pattern: String,
@@ -129,6 +135,9 @@ enum Command {
         ignore_case: bool,
         #[arg(short = 'F', long)]
         fixed_strings: bool,
+        /// Annotate each hit with its enclosing symbol's line span (heuristic; opt-in).
+        #[arg(long)]
+        symbols: bool,
     },
 
     /// List docs linked to a slice.
@@ -268,7 +277,15 @@ fn run_inner(args: Args) -> Result<i32> {
             pattern,
             ignore_case,
             fixed_strings,
-        } => commands::grep(&ctx, &selector, &pattern, ignore_case, fixed_strings),
+            symbols,
+        } => commands::grep(
+            &ctx,
+            &selector,
+            &pattern,
+            ignore_case,
+            fixed_strings,
+            symbols,
+        ),
         Command::Docs { selector, json } => commands::docs(&ctx, &selector, json),
         Command::StaleDocs { json } => commands::stale_docs(&ctx, json, &styles),
         Command::Check {

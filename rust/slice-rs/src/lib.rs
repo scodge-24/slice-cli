@@ -13,5 +13,6 @@ pub mod manifest;
 pub mod models;
 pub mod paths;
 pub mod slices;
+pub mod symbols;
 
 pub use error::{Error, Result};

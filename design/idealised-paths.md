@@ -1,5 +1,18 @@
 # Idealised paths — and what detracts the agent from them
 
+> **⚠ PREMISE FALSIFIED (2026-06-06) — keep this doc as a record of the reasoning, not a live model.**
+> The core claim below — coverage is lost at one gate because the agent *can't see* collaborators, so
+> the fix is to make them visible at the ORIENT beat — was tested directly (`--gate-affordances`
+> inlined the collaborator files into `slice_context`) and **failed**: xarray coverage went 0.90 →
+> 0.70, not up. The falsifying fact is a count, not a noisy delta: **base already reads the gold
+> collaborator `utils.py` 4/5 seeds** — it was never invisible. The inline list just added noise that
+> displaced a working process. What actually held: base (slice+stage2+thinking) is near its ceiling,
+> and *every* retrieval-surface addition (AST, semantic ×2, inline-collaborators) is neutral-to-harmful
+> → the only supported direction is **consolidation** (fewer/cleaner tools), and the residual gap looks
+> model/budget-bound. See `FINDINGS.md` §"gate-affordance test FALSIFIES…". Detractors 4 (advisory
+> handoffs) and 5 (overlap/displacement) survive as real; detractor 2 (invisibility) does not — the gap
+> was never invisible to base.
+
 Companion to [`slice-cli-feature-map.md`](slice-cli-feature-map.md). The point of this doc is **not** a
 prescriptive "after tool 1 call tool 2" playbook — the ideal path is obvious and the agent could
 reconstruct it. The point is the **force diagram**: why, given the obvious path, the agent reliably

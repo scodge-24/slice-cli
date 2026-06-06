@@ -419,13 +419,20 @@ fn grep_symbols_annotates_enclosing_span_opt_in() {
     let without = run_rust_raw(&["grep", "auth-service", "def verify_token"]);
     assert!(!stdout_text(&without).contains("[span"));
 
-    // A decorated def is ambiguous (api-handlers get_user is preceded by @require_auth) → left
-    // unannotated rather than mis-spanned.
+    // A decorated def (api-handlers get_user is preceded by @require_auth): the heuristic leaves it
+    // unannotated (ambiguous start) rather than mis-span it; the AST backend spans it confidently.
     let decorated = run_rust_raw(&["grep", "api-handlers", "def get_user", "--symbols"]);
     assert_eq!(decorated.0, 0);
+    #[cfg(not(feature = "ast"))]
     assert!(
         !stdout_text(&decorated).contains("[span"),
-        "decorated def must not be annotated: {}",
+        "decorated def must not be annotated (heuristic): {}",
+        stdout_text(&decorated)
+    );
+    #[cfg(feature = "ast")]
+    assert!(
+        stdout_text(&decorated).contains("[span get_user"),
+        "decorated def must be annotated under the AST backend: {}",
         stdout_text(&decorated)
     );
 
@@ -2006,25 +2013,50 @@ fn outline_anchors_symbols_and_declares_coverage() {
     // never silently dropped.
     let human = run_rust_raw_for_repo(repo, &["outline", "src/mod.py"]);
     assert_eq!(human.0, 0);
+    #[cfg(not(feature = "ast"))]
     assert_eq!(
         stdout_text(&human),
         "src/mod.py:1-2\ttop\nsrc/mod.py:5-7\tC\nsrc/mod.py:6-7\tmethod\ncoverage: 3/4 definitions spanned\n"
+    );
+    // Under the AST backend the decorated def is spanned too (decorators included, lines 10-12) →
+    // full declared coverage.
+    #[cfg(feature = "ast")]
+    assert_eq!(
+        stdout_text(&human),
+        "src/mod.py:1-2\ttop\nsrc/mod.py:5-7\tC\nsrc/mod.py:6-7\tmethod\nsrc/mod.py:10-12\tdecorated\ncoverage: 4/4 definitions spanned\n"
     );
 
     // JSON carries the same rows + the spanned/total counts.
     let (status, value) = run_rust_for_repo(repo, &["outline", "src/mod.py", "--json"]);
     assert_eq!(status, 0);
     assert_eq!(value["selector"], "src/mod.py");
-    assert_eq!(value["spanned"], 3);
-    assert_eq!(value["total"], 4);
-    assert_eq!(
-        value["symbols"],
-        json!([
-            {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
-            {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
-            {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
-        ])
-    );
+    #[cfg(not(feature = "ast"))]
+    {
+        assert_eq!(value["spanned"], 3);
+        assert_eq!(value["total"], 4);
+        assert_eq!(
+            value["symbols"],
+            json!([
+                {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
+                {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
+                {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
+            ])
+        );
+    }
+    #[cfg(feature = "ast")]
+    {
+        assert_eq!(value["spanned"], 4);
+        assert_eq!(value["total"], 4);
+        assert_eq!(
+            value["symbols"],
+            json!([
+                {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
+                {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
+                {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
+                {"file": "src/mod.py", "name": "decorated", "start": 10, "end": 12},
+            ])
+        );
+    }
 
     // An unsupported file type is a soft exit 1 with a stderr note, not a crash or a false "0/0".
     let md = run_rust_raw_for_repo(repo, &["outline", "slices/m.md"]);
@@ -2044,14 +2076,29 @@ fn symbols_aggregates_declared_coverage_across_slice_files() {
     let text = stdout_text(&human);
     assert!(text.contains("src/mod.py:1-2\ttop"), "got:\n{text}");
     assert!(text.contains("src/other.py:1-2\thelper"), "got:\n{text}");
+    #[cfg(not(feature = "ast"))]
     assert!(
         text.contains("coverage: 4/5 definitions spanned"),
         "aggregate declared coverage across the slice; got:\n{text}"
+    );
+    // The AST backend spans the decorated def too → full coverage across the slice.
+    #[cfg(feature = "ast")]
+    assert!(
+        text.contains("coverage: 5/5 definitions spanned"),
+        "AST backend spans every def across the slice; got:\n{text}"
     );
 
     let (status, value) = run_rust_for_repo(repo, &["symbols", "m", "--json"]);
     assert_eq!(status, 0);
     assert_eq!(value["selector"], "m");
-    assert_eq!(value["spanned"], 4);
-    assert_eq!(value["total"], 5);
+    #[cfg(not(feature = "ast"))]
+    {
+        assert_eq!(value["spanned"], 4);
+        assert_eq!(value["total"], 5);
+    }
+    #[cfg(feature = "ast")]
+    {
+        assert_eq!(value["spanned"], 5);
+        assert_eq!(value["total"], 5);
+    }
 }

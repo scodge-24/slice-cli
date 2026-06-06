@@ -463,6 +463,19 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
+/// Top-`CANDIDATES` units by cosine to the query vector — the candidate-generation step, the only
+/// place the raw vector score decides anything (the downstream rank is deterministic).
+fn candidates(units: &[IndexUnit], qvec: &[f32]) -> Vec<(usize, f32)> {
+    let mut scored: Vec<(usize, f32)> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (i, cosine(qvec, &u.vector)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    scored.truncate(CANDIDATES);
+    scored
+}
+
 /// Deterministic rank comparator (plan §7: the vector score only *generates* candidates; freshness
 /// and topology *own* the ranking). Tuple = `(fresh, breadth, reverse_dep, cosine, slice_id)`. Order:
 /// fresh before stale, then more matched units, then more depended-upon, then cosine as the final
@@ -488,6 +501,10 @@ struct Hit<'a> {
     /// The actionable navigation target: the owning slice's files (cards mode) or the chunk's single
     /// `file:line`-bearing file (code modes).
     files: Vec<String>,
+    /// The matched unit's `file:line` anchor for code modes (the symbol's definition site), so a
+    /// consumer can read the exact span; `null` for card units (slice-level, no precise line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<&'a str>,
     /// `fresh` | `stale` (owning slice drifted since build) | `missing` (slice deleted).
     freshness: &'static str,
     /// Why this hit surfaced: the matched unit's kind + text + cosine score (§7: every hit has a reason).
@@ -542,15 +559,7 @@ pub fn query(
         }
     }
 
-    // Candidate generation: cosine over every unit, keep the top-K units.
-    let mut scored: Vec<(usize, f32)> = index
-        .units
-        .iter()
-        .enumerate()
-        .map(|(i, u)| (i, cosine(&qvec, &u.vector)))
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-    scored.truncate(CANDIDATES);
+    let scored = candidates(&index.units, &qvec);
 
     // Aggregate candidates by slice (cards) or by file (code): best unit + breadth (matched-unit
     // count). The owning slice (rep.slice_id) drives freshness/reverse-dep either way.
@@ -600,6 +609,11 @@ pub fn query(
                 hit: Hit {
                     slice_id: owner,
                     files,
+                    anchor: if code {
+                        agg.rep.anchor.as_deref()
+                    } else {
+                        None
+                    },
                     freshness,
                     kind: &agg.rep.kind,
                     text: &agg.rep.text,

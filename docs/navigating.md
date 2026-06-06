@@ -68,6 +68,22 @@ slice find idempotency      # which slices mention a concept/abstraction
 `find` searches slice descriptions, abstractions, and bodies, and tags each hit with where
 it matched (`[abstractions]`, `[body]`, …).
 
+### Semantic search (opt-in, `semantic` build feature)
+
+When you can't name the symbol, describe the behaviour in natural language and rank by
+meaning instead of keyword. Built only with the `semantic` feature; needs `OPENROUTER_API_KEY`.
+
+```bash
+slice semantic-index --units code      # build the embedding index once (regenerable, slice-owned)
+slice find "reject an empty blueprint name" --semantic --units code
+```
+
+`--units cards` embeds each slice's description + abstractions; `--units code` embeds the
+source symbols themselves, so every hit carries the matching symbol's `file:line`. The vector
+score is only a candidate generator — the final ranking is deterministic (owning slice,
+reverse-dependency distance, freshness), and a hit whose owning slice has drifted since the
+index was built is flagged stale rather than silently returned.
+
 To grep the actual source files owned by a slice:
 
 ```bash

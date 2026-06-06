@@ -136,6 +136,10 @@ enum Command {
         #[cfg(feature = "semantic")]
         #[arg(long)]
         semantic: bool,
+        /// Which embedding index to query: cards | code | code-sliceaug.
+        #[cfg(feature = "semantic")]
+        #[arg(long, value_enum, default_value = "cards")]
+        units: crate::semantic::UnitMode,
     },
 
     /// Fuzzy-pick a slice with fzf (interactive).
@@ -251,6 +255,10 @@ enum Command {
         /// Embedding dimensions (default: 512; only models supporting reduction honour it).
         #[arg(long)]
         dimensions: Option<usize>,
+        /// Which units to embed: cards (description + abstractions) | code (symbol bodies) |
+        /// code-sliceaug (symbol bodies prepended with owning-slice context).
+        #[arg(long, value_enum, default_value = "cards")]
+        units: crate::semantic::UnitMode,
     },
 }
 
@@ -321,10 +329,12 @@ fn run_inner(args: Args) -> Result<i32> {
             json,
             #[cfg(feature = "semantic")]
             semantic,
+            #[cfg(feature = "semantic")]
+            units,
         } => {
             #[cfg(feature = "semantic")]
             if semantic {
-                return crate::semantic::query(&ctx, &needle, json, &styles);
+                return crate::semantic::query(&ctx, &needle, json, &styles, units);
             }
             commands::find(&ctx, &needle, json, &styles)
         }
@@ -411,8 +421,10 @@ fn run_inner(args: Args) -> Result<i32> {
             force,
         } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
         #[cfg(feature = "semantic")]
-        Command::SemanticIndex { model, dimensions } => {
-            crate::semantic::build_index(&ctx, model, dimensions)
-        }
+        Command::SemanticIndex {
+            model,
+            dimensions,
+            units,
+        } => crate::semantic::build_index(&ctx, model, dimensions, units),
     }
 }

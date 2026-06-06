@@ -1,16 +1,16 @@
 //! Stage 4 — semantic / hybrid retrieval lens. Compiled only under the `semantic` feature.
 //!
-//! Embeds slice-ANCHORED units (slice descriptions and abstractions today; runtime-flow and
-//! test-description units can be added to [`extract_units`] later without touching anything else) and
-//! persists a staleness-tracked vector index as slice-owned state (`slices/SEMANTIC.json`). This
-//! file is commit 1: build + persist the index. The query path (`find --semantic`) lands next and
-//! treats the vector score as a CANDIDATE GENERATOR only — deterministic topology owns the final
-//! rank — and flags any hit whose owning slice has drifted since the index was built.
+//! Embeds slice-ANCHORED units into a staleness-tracked vector index (slice-owned state under
+//! `slices/`), and `find --semantic` queries it: cosine generates candidates, deterministic topology
+//! owns the rank, and a drifted owning slice flags the hit stale. Three unit surfaces ([`UnitMode`])
+//! coexist for A/B comparison: `cards` (description + abstractions — the default thin NL surface),
+//! `code` (one symbol-body chunk per definition), and `code-sliceaug` (the same chunks prepended with
+//! owning-slice context — contextual-retrieval augmentation). Each mode writes its own index file.
 //!
-//! Plan §7 guardrails honoured here and below: embed only slice-anchored units, never anonymous
-//! source chunks; the provider is a trait (`OpenRouter` first, a local/offline backend droppable in
-//! later); every unit stores its owning slice's content fingerprint so a stale hit can be flagged,
-//! not silently returned.
+//! Plan §7 guardrails: every unit stays slice-anchored (`slice_id` + `file:line` for code; never an
+//! anonymous chunk); the vector score is a CANDIDATE GENERATOR only — topology + freshness rank; the
+//! provider is a trait (`OpenRouter` first, a local/offline backend droppable in later); each unit
+//! stores its owning slice's content fingerprint so a stale hit is flagged, not silently returned.
 
 use std::cmp::Ordering;
 
@@ -23,6 +23,7 @@ use crate::context::Context;
 use crate::models::SliceDoc;
 use crate::paths::expand_literal_or_existing;
 use crate::slices::load_slice_docs;
+use crate::symbols;
 use crate::{Error, Result};
 
 const DEFAULT_MODEL: &str = "google/gemini-embedding-2";
@@ -30,8 +31,42 @@ const DEFAULT_MODEL: &str = "google/gemini-embedding-2";
 /// keeps the on-disk index lean with minimal quality loss versus the native (3072 for gemini).
 const DEFAULT_DIMS: usize = 512;
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/embeddings";
-/// Slice-owned artifact, sibling to `DOCS.yaml` / `INDEX.md`.
-pub const INDEX_FILE: &str = "SEMANTIC.json";
+/// Per-chunk embedding-input cap (chars). Keeps a long symbol body under the model's per-input token
+/// limit; the `file:line` anchor is preserved regardless of truncation.
+const MAX_CHUNK_CHARS: usize = 6000;
+
+/// Which slice-anchored units get embedded. Selects both what is indexed and the on-disk filename, so
+/// the card and code indexes coexist for A/B comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum UnitMode {
+    /// Card description + abstractions (the default; thin NL summary surface).
+    Cards,
+    /// Source-code symbol-body chunks (each anchored to its owning slice + `file:line`).
+    Code,
+    /// Code chunks prepended with their owning-slice context (`slice_id` + description + the matching
+    /// abstraction + runtime-flow lines) — contextual-retrieval augmentation from the curated card.
+    #[value(name = "code-sliceaug")]
+    CodeSliceAug,
+}
+
+impl UnitMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cards => "cards",
+            Self::Code => "code",
+            Self::CodeSliceAug => "code-sliceaug",
+        }
+    }
+
+    /// On-disk index filename for this mode (modes coexist so the ruler can compare them).
+    fn index_file(self) -> &'static str {
+        match self {
+            Self::Cards => "SEMANTIC.json",
+            Self::Code => "SEMANTIC-code.json",
+            Self::CodeSliceAug => "SEMANTIC-code-sliceaug.json",
+        }
+    }
+}
 
 /// An embedding provider. `OpenRouter` is the first backend; a local/offline embedder can implement
 /// the same trait later without touching the index or query code (plan §7: pluggable, ships local-able).
@@ -121,6 +156,14 @@ pub struct SemanticIndex {
     pub provider: String,
     pub model: String,
     pub dims: usize,
+    /// `cards` | `code` | `code-sliceaug` — which unit surface was embedded.
+    #[serde(default)]
+    pub unit_mode: String,
+    /// The retrieval task-type sent to the model, or `null` when unavailable. `OpenRouter`'s Gemini
+    /// passthrough ignores `task_type` (verified: DOCUMENT == QUERY == none), so it is recorded as
+    /// `null` rather than silently implied — all arms are symmetric embeddings.
+    #[serde(default)]
+    pub task_type: Option<String>,
     pub built_at: String,
     pub units: Vec<IndexUnit>,
 }
@@ -175,8 +218,17 @@ fn unit_texts(doc: &SliceDoc) -> Vec<(&'static str, String)> {
     out
 }
 
-/// Attach each slice's fingerprint to its [`unit_texts`], producing the units to embed.
-fn extract_units(ctx: &Context, docs: &[SliceDoc]) -> Vec<PendingUnit> {
+/// The units to embed for `mode`: card description + abstractions (`Cards`), or one symbol-body chunk
+/// per definition (`Code`/`CodeSliceAug`). Every unit stays slice-anchored.
+fn extract_units(ctx: &Context, docs: &[SliceDoc], mode: UnitMode) -> Vec<PendingUnit> {
+    match mode {
+        UnitMode::Cards => card_units(ctx, docs),
+        UnitMode::Code | UnitMode::CodeSliceAug => code_units(ctx, docs, mode),
+    }
+}
+
+/// Attach each slice's fingerprint to its [`unit_texts`], producing the card units to embed.
+fn card_units(ctx: &Context, docs: &[SliceDoc]) -> Vec<PendingUnit> {
     let mut units = Vec::new();
     for doc in docs {
         let fp = slice_fingerprint(ctx, doc);
@@ -193,14 +245,122 @@ fn extract_units(ctx: &Context, docs: &[SliceDoc]) -> Vec<PendingUnit> {
     units
 }
 
-/// Build and persist the semantic index. Network-bound (one embedding call per ≤128-unit chunk).
-pub fn build_index(ctx: &Context, model: Option<String>, dimensions: Option<usize>) -> Result<i32> {
+/// The repo-relative source files a slice covers (literal or glob-expanded), deduped.
+fn expand_files(ctx: &Context, doc: &SliceDoc) -> Vec<String> {
+    let mut paths = Vec::new();
+    for raw in &doc.files {
+        paths.extend(expand_literal_or_existing(raw, ctx));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// One embedded unit per spannable symbol in the slice's files. `Code` embeds the symbol body alone;
+/// `CodeSliceAug` prepends the owning-slice context (the augmentation under test). Chunking is
+/// IDENTICAL across the two modes — only the embedded input text differs — so the A/B isolates the
+/// augmentation. Each unit carries `slice_id` + `file:line` (never anonymous; §7 guardrail).
+fn code_units(ctx: &Context, docs: &[SliceDoc], mode: UnitMode) -> Vec<PendingUnit> {
+    let mut units = Vec::new();
+    for doc in docs {
+        let fp = slice_fingerprint(ctx, doc);
+        let flows = runtime_flow_lines(&doc.body);
+        for rel in expand_files(ctx, doc) {
+            let Some(lang) = symbols::lang_for_path(&rel) else {
+                continue;
+            };
+            let Some(content) = read_repo_file(ctx, &rel) else {
+                continue;
+            };
+            let lines: Vec<&str> = content.lines().collect();
+            let (syms, _) = symbols::enumerate_symbols(&content, lang);
+            for sym in syms {
+                let end = sym.end.min(lines.len()).max(sym.start);
+                let body = lines[sym.start - 1..end].join("\n");
+                let text = match mode {
+                    UnitMode::CodeSliceAug => {
+                        let head = slice_context(doc, &sym.name, &flows);
+                        truncate_chars(&format!("{head}\n\n{body}"), MAX_CHUNK_CHARS)
+                    }
+                    _ => truncate_chars(&body, MAX_CHUNK_CHARS),
+                };
+                units.push(PendingUnit {
+                    slice_id: doc.slice_id.clone(),
+                    kind: "code",
+                    anchor: Some(format!("{rel}:{}", sym.start)),
+                    text,
+                    slice_fp: fp.clone(),
+                });
+            }
+        }
+    }
+    units
+}
+
+fn read_repo_file(ctx: &Context, rel: &str) -> Option<String> {
+    std::fs::read_to_string(ctx.repo_root().join(rel)).ok()
+}
+
+/// The owning-slice context prepended to a chunk in `CodeSliceAug`: the slice id + description, the
+/// abstraction line naming this symbol (if any), and runtime-flow lines that mention it.
+fn slice_context(doc: &SliceDoc, sym_name: &str, flows: &[String]) -> String {
+    let mut parts = vec![format!("slice {} — {}", doc.slice_id, doc.description)];
+    for abs in &doc.abstractions {
+        if abs
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == sym_name)
+        {
+            parts.push(abs.clone());
+        }
+    }
+    for flow in flows {
+        if flow.contains(sym_name) {
+            parts.push(flow.clone());
+        }
+    }
+    parts.join("\n")
+}
+
+/// Non-blank lines under the card's `## Runtime Flows` section (until the next `## ` heading).
+fn runtime_flow_lines(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_flows = false;
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            in_flows = heading.trim().eq_ignore_ascii_case("Runtime Flows");
+            continue;
+        }
+        if in_flows && !line.trim().is_empty() {
+            out.push(line.trim().to_owned());
+        }
+    }
+    out
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    s.chars().take(max).collect()
+}
+
+/// Build and persist the semantic index for `mode`. Network-bound (one embedding call per ≤96-unit
+/// chunk). Each mode writes its own file so card and code indexes coexist for comparison.
+pub fn build_index(
+    ctx: &Context,
+    model: Option<String>,
+    dimensions: Option<usize>,
+    mode: UnitMode,
+) -> Result<i32> {
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     let dims = dimensions.unwrap_or(DEFAULT_DIMS);
     let docs = load_slice_docs(ctx)?;
-    let pending = extract_units(ctx, &docs);
+    let pending = extract_units(ctx, &docs, mode);
     if pending.is_empty() {
-        eprintln!("no slice-anchored units to embed (are there slices with descriptions?)");
+        eprintln!(
+            "no {} units to embed (are there slices with source files?)",
+            mode.label()
+        );
         return Ok(1);
     }
 
@@ -230,18 +390,22 @@ pub fn build_index(ctx: &Context, model: Option<String>, dimensions: Option<usiz
         provider: "openrouter".to_owned(),
         model: embedder.model_id().to_owned(),
         dims,
+        unit_mode: mode.label().to_owned(),
+        // OpenRouter's Gemini passthrough ignores task_type (verified), so all arms are symmetric.
+        task_type: None,
         built_at: ctx.head_sha(),
         units,
     };
 
-    let path = ctx.slices_dir().join(INDEX_FILE);
+    let path = ctx.slices_dir().join(mode.index_file());
     let json = serde_json::to_string(&index)?;
     std::fs::write(&path, json).map_err(|source| Error::Write {
         path: path.clone(),
         source,
     })?;
     println!(
-        "semantic index: {} units across {} slices ({}, {} dims) -> {}",
+        "semantic index [{}]: {} units across {} slices ({}, {} dims) -> {}",
+        index.unit_mode,
         index.units.len(),
         slice_count,
         index.model,
@@ -253,9 +417,9 @@ pub fn build_index(ctx: &Context, model: Option<String>, dimensions: Option<usiz
 
 // --- query (find --semantic) ----------------------------------------------------------------
 
-/// Load the persisted index, or `None` if it hasn't been built yet.
-fn load_index(ctx: &Context) -> Result<Option<SemanticIndex>> {
-    let path = ctx.slices_dir().join(INDEX_FILE);
+/// Load the persisted index for `mode`, or `None` if it hasn't been built yet.
+fn load_index(ctx: &Context, mode: UnitMode) -> Result<Option<SemanticIndex>> {
+    let path = ctx.slices_dir().join(mode.index_file());
     match std::fs::read_to_string(&path) {
         Ok(raw) => {
             let index: SemanticIndex = serde_json::from_str(&raw).map_err(|e| {
@@ -266,6 +430,24 @@ fn load_index(ctx: &Context) -> Result<Option<SemanticIndex>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(Error::Read { path, source }),
     }
+}
+
+/// The file portion of a code unit's `file:line` anchor, or the `slice_id` as a fallback.
+fn unit_file(u: &IndexUnit) -> String {
+    u.anchor
+        .as_deref()
+        .and_then(|a| a.rsplit_once(':'))
+        .map_or_else(|| u.slice_id.clone(), |(f, _)| f.to_owned())
+}
+
+/// Embed the query with the SAME model/dims the index was built with — vectors are only comparable
+/// within one model.
+fn embed_query(index: &SemanticIndex, needle: &str) -> Result<Vec<f32>> {
+    let embedder = OpenRouterEmbedder::from_env(index.model.clone(), index.dims)?;
+    embedder
+        .embed(std::slice::from_ref(&needle.to_owned()))?
+        .pop()
+        .ok_or_else(|| Error::Embedding("no embedding returned for query".to_owned()))
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -303,8 +485,9 @@ struct Agg<'a> {
 #[derive(Serialize)]
 struct Hit<'a> {
     slice_id: &'a str,
-    /// The slice's files — the actionable navigation target (precise symbol anchors land later).
-    files: &'a [String],
+    /// The actionable navigation target: the owning slice's files (cards mode) or the chunk's single
+    /// `file:line`-bearing file (code modes).
+    files: Vec<String>,
     /// `fresh` | `stale` (owning slice drifted since build) | `missing` (slice deleted).
     freshness: &'static str,
     /// Why this hit surfaced: the matched unit's kind + text + cosine score (§7: every hit has a reason).
@@ -325,25 +508,30 @@ const CANDIDATES: usize = 24;
 const SHOW: usize = 10;
 
 /// `find --semantic`: embed the query, generate candidates by cosine, re-rank deterministically, and
-/// emit anchored hits with freshness + a reason. Network-bound (embeds the query once).
-pub fn query(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<i32> {
-    let Some(index) = load_index(ctx)? else {
-        eprintln!("no semantic index; run `slice semantic-index` first");
+/// emit anchored hits with freshness + a reason. Network-bound (embeds the query once). Candidates
+/// aggregate to slices (cards mode) or to files (code modes), matching each surface's granularity.
+pub fn query(
+    ctx: &Context,
+    needle: &str,
+    json: bool,
+    styles: &Styles,
+    mode: UnitMode,
+) -> Result<i32> {
+    let Some(index) = load_index(ctx, mode)? else {
+        eprintln!(
+            "no {} semantic index; run `slice semantic-index --units {}` first",
+            mode.label(),
+            mode.label()
+        );
         return Ok(1);
     };
     if index.units.is_empty() {
         eprintln!("semantic index is empty; rebuild with `slice semantic-index`");
         return Ok(1);
     }
+    let code = index.unit_mode != UnitMode::Cards.label();
 
-    // Embed the query with the SAME model/dims the index was built with — vectors are only comparable
-    // within one model.
-    let embedder = OpenRouterEmbedder::from_env(index.model.clone(), index.dims)?;
-    let q = needle.to_owned();
-    let qvec = embedder
-        .embed(std::slice::from_ref(&q))?
-        .pop()
-        .ok_or_else(|| Error::Embedding("no embedding returned for query".to_owned()))?;
+    let qvec = embed_query(&index, needle)?;
 
     let docs = load_slice_docs(ctx)?;
     let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
@@ -364,11 +552,17 @@ pub fn query(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     scored.truncate(CANDIDATES);
 
-    // Aggregate candidates to slices: best unit (the representative) + breadth (matched-unit count).
-    let mut by_slice: FxHashMap<&str, Agg> = FxHashMap::default();
+    // Aggregate candidates by slice (cards) or by file (code): best unit + breadth (matched-unit
+    // count). The owning slice (rep.slice_id) drives freshness/reverse-dep either way.
+    let mut by_key: FxHashMap<String, Agg> = FxHashMap::default();
     for (i, score) in &scored {
         let u = &index.units[*i];
-        let entry = by_slice.entry(u.slice_id.as_str()).or_insert(Agg {
+        let key = if code {
+            unit_file(u)
+        } else {
+            u.slice_id.clone()
+        };
+        let entry = by_key.entry(key).or_insert(Agg {
             rep: u,
             score: *score,
             breadth: 0,
@@ -381,22 +575,30 @@ pub fn query(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result
     }
 
     // Build each hit with its deterministic sort keys captured alongside, then re-rank.
-    let mut ranked: Vec<Ranked> = by_slice
+    let mut ranked: Vec<Ranked> = by_key
         .iter()
-        .map(|(sid, agg)| {
-            let (files, freshness): (&[String], &'static str) = match by_id.get(sid) {
-                None => (&[], "missing"),
-                Some(d) if slice_fingerprint(ctx, d) == agg.rep.slice_fp => {
-                    (d.files.as_slice(), "fresh")
-                }
-                Some(d) => (d.files.as_slice(), "stale"),
+        .map(|(key, agg)| {
+            let owner = agg.rep.slice_id.as_str();
+            let freshness = match by_id.get(owner) {
+                None => "missing",
+                Some(d) if slice_fingerprint(ctx, d) == agg.rep.slice_fp => "fresh",
+                Some(_) => "stale",
+            };
+            // Code modes report the chunk's single file; cards report the owning slice's file list.
+            let files = if code {
+                vec![key.clone()]
+            } else {
+                by_id
+                    .get(owner)
+                    .map(|d| d.files.clone())
+                    .unwrap_or_default()
             };
             Ranked {
                 fresh: freshness == "fresh",
                 breadth: agg.breadth,
-                revdep: revdep.get(sid).copied().unwrap_or(0),
+                revdep: revdep.get(owner).copied().unwrap_or(0),
                 hit: Hit {
-                    slice_id: sid,
+                    slice_id: owner,
                     files,
                     freshness,
                     kind: &agg.rep.kind,
@@ -511,6 +713,8 @@ mod tests {
             provider: "openrouter".to_owned(),
             model: "openai/text-embedding-3-small".to_owned(),
             dims: 2,
+            unit_mode: "cards".to_owned(),
+            task_type: None,
             built_at: "abc123".to_owned(),
             units: vec![IndexUnit {
                 slice_id: "auth".to_owned(),
@@ -580,5 +784,61 @@ mod tests {
         let long = "x".repeat(80);
         let s = snippet(&long);
         assert!(s.ends_with('…') && s.chars().count() == 61); // 60 chars + ellipsis
+    }
+
+    #[test]
+    fn runtime_flow_lines_extracts_only_the_flows_section() {
+        let body = "lede\n\n## System Behavior\nbehaviour line\n\n## Runtime Flows\nrequest -> verify_token -> handler\nsecond flow\n\n## Verification\nnot a flow\n";
+        assert_eq!(
+            runtime_flow_lines(body),
+            vec![
+                "request -> verify_token -> handler".to_owned(),
+                "second flow".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn slice_context_includes_matching_abstraction_and_flow_only() {
+        let d = doc(
+            "auth",
+            "Authentication and sessions",
+            &["verify_token — JWT verification", "rotate — refresh"],
+        );
+        let flows = vec!["request -> verify_token -> handler".to_owned()];
+        let head = slice_context(&d, "verify_token", &flows);
+        // header + the verify_token abstraction + the flow mentioning it; the `rotate` abstraction is excluded.
+        assert_eq!(
+            head,
+            "slice auth — Authentication and sessions\nverify_token — JWT verification\nrequest -> verify_token -> handler"
+        );
+        // a symbol named by no abstraction/flow gets just the header.
+        assert_eq!(
+            slice_context(&d, "unrelated", &flows),
+            "slice auth — Authentication and sessions"
+        );
+    }
+
+    #[test]
+    fn unit_file_takes_the_path_before_the_line_number() {
+        let u = IndexUnit {
+            slice_id: "s".to_owned(),
+            kind: "code".to_owned(),
+            anchor: Some("src/auth/middleware.py:42".to_owned()),
+            text: String::new(),
+            slice_fp: String::new(),
+            vector: vec![],
+        };
+        assert_eq!(unit_file(&u), "src/auth/middleware.py");
+    }
+
+    #[test]
+    fn unit_mode_files_are_distinct_per_mode() {
+        assert_eq!(UnitMode::Cards.index_file(), "SEMANTIC.json");
+        assert_ne!(UnitMode::Code.index_file(), UnitMode::Cards.index_file());
+        assert_ne!(
+            UnitMode::CodeSliceAug.index_file(),
+            UnitMode::Code.index_file()
+        );
     }
 }

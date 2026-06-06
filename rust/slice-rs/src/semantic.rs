@@ -25,9 +25,9 @@ use crate::paths::expand_literal_or_existing;
 use crate::slices::load_slice_docs;
 use crate::{Error, Result};
 
-const DEFAULT_MODEL: &str = "openai/text-embedding-3-small";
-/// text-embedding-3-* support dimension reduction; 512 keeps the on-disk index lean with minimal
-/// quality loss versus the native 1536.
+const DEFAULT_MODEL: &str = "google/gemini-embedding-2";
+/// Matryoshka-trained models (gemini-embedding, text-embedding-3-*) support dimension reduction; 512
+/// keeps the on-disk index lean with minimal quality loss versus the native (3072 for gemini).
 const DEFAULT_DIMS: usize = 512;
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/embeddings";
 /// Slice-owned artifact, sibling to `DOCS.yaml` / `INDEX.md`.

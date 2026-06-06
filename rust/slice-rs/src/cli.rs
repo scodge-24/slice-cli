@@ -245,7 +245,7 @@ enum Command {
     /// regenerable state; rebuild it after slices change.
     #[cfg(feature = "semantic")]
     SemanticIndex {
-        /// Embedding model (default: openai/text-embedding-3-small).
+        /// Embedding model (default: google/gemini-embedding-2).
         #[arg(long)]
         model: Option<String>,
         /// Embedding dimensions (default: 512; only models supporting reduction honour it).

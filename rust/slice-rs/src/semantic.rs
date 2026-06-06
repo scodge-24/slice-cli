@@ -69,8 +69,9 @@ impl Embedder for OpenRouterEmbedder {
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts.len());
-        // Chunk so a large slice corpus never builds one oversized request.
-        for chunk in texts.chunks(128) {
+        // Chunk so a large slice corpus never builds one oversized request. 96 stays under
+        // gemini-embedding's 100-inputs-per-batch cap (OpenAI models allow far more).
+        for chunk in texts.chunks(96) {
             let body = serde_json::json!({
                 "model": self.model,
                 "input": chunk,

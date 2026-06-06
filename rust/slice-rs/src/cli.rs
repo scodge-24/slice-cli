@@ -125,10 +125,17 @@ enum Command {
     },
 
     /// Search slices by keyword.
+    ///
+    /// With --semantic (requires the `semantic` build feature + a built index), ranks slices by
+    /// embedding similarity instead of keyword match — for concepts you can't name by symbol.
     Find {
         needle: String,
         #[arg(long)]
         json: bool,
+        /// Semantic (embedding) search over the slice index instead of keyword match.
+        #[cfg(feature = "semantic")]
+        #[arg(long)]
+        semantic: bool,
     },
 
     /// Fuzzy-pick a slice with fzf (interactive).
@@ -309,7 +316,18 @@ fn run_inner(args: Args) -> Result<i32> {
             best_effort,
             json,
         } => commands::context(&ctx, &selector, strict, best_effort, json),
-        Command::Find { needle, json } => commands::find(&ctx, &needle, json, &styles),
+        Command::Find {
+            needle,
+            json,
+            #[cfg(feature = "semantic")]
+            semantic,
+        } => {
+            #[cfg(feature = "semantic")]
+            if semantic {
+                return crate::semantic::query(&ctx, &needle, json, &styles);
+            }
+            commands::find(&ctx, &needle, json, &styles)
+        }
         Command::Browse { query, print } => {
             commands::browse(&ctx, query.as_deref(), print, &styles, color)
         }

@@ -12,9 +12,13 @@
 //! later); every unit stores its owning slice's content fingerprint so a stale hit can be flagged,
 //! not silently returned.
 
+use std::cmp::Ordering;
+
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::commands::content_fingerprint;
+use crate::color::Styles;
+use crate::commands::{content_fingerprint, emit_json};
 use crate::context::Context;
 use crate::models::SliceDoc;
 use crate::paths::expand_literal_or_existing;
@@ -246,6 +250,214 @@ pub fn build_index(ctx: &Context, model: Option<String>, dimensions: Option<usiz
     Ok(0)
 }
 
+// --- query (find --semantic) ----------------------------------------------------------------
+
+/// Load the persisted index, or `None` if it hasn't been built yet.
+fn load_index(ctx: &Context) -> Result<Option<SemanticIndex>> {
+    let path = ctx.slices_dir().join(INDEX_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let index: SemanticIndex = serde_json::from_str(&raw).map_err(|e| {
+                Error::InvalidInput(format!("invalid semantic index {}: {e}", ctx.rel(&path)))
+            })?;
+            Ok(Some(index))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(Error::Read { path, source }),
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Deterministic rank comparator (plan §7: the vector score only *generates* candidates; freshness
+/// and topology *own* the ranking). Tuple = `(fresh, breadth, reverse_dep, cosine, slice_id)`. Order:
+/// fresh before stale, then more matched units, then more depended-upon, then cosine as the final
+/// tiebreak only, then `slice_id` for stability. Cosine never outranks a deterministic signal.
+fn rank_cmp(a: (bool, usize, usize, f32, &str), b: (bool, usize, usize, f32, &str)) -> Ordering {
+    b.0.cmp(&a.0)
+        .then(b.1.cmp(&a.1))
+        .then(b.2.cmp(&a.2))
+        .then(b.3.partial_cmp(&a.3).unwrap_or(Ordering::Equal))
+        .then(a.4.cmp(b.4))
+}
+
+/// A query candidate aggregated to its owning slice.
+struct Agg<'a> {
+    rep: &'a IndexUnit,
+    score: f32,
+    breadth: usize,
+}
+
+#[derive(Serialize)]
+struct Hit<'a> {
+    slice_id: &'a str,
+    /// The slice's files — the actionable navigation target (precise symbol anchors land later).
+    files: &'a [String],
+    /// `fresh` | `stale` (owning slice drifted since build) | `missing` (slice deleted).
+    freshness: &'static str,
+    /// Why this hit surfaced: the matched unit's kind + text + cosine score (§7: every hit has a reason).
+    kind: &'a str,
+    text: &'a str,
+    score: f32,
+}
+
+/// A `Hit` with its deterministic sort keys captured, so re-ranking never re-derives them.
+struct Ranked<'a> {
+    hit: Hit<'a>,
+    fresh: bool,
+    breadth: usize,
+    revdep: usize,
+}
+
+const CANDIDATES: usize = 24;
+const SHOW: usize = 10;
+
+/// `find --semantic`: embed the query, generate candidates by cosine, re-rank deterministically, and
+/// emit anchored hits with freshness + a reason. Network-bound (embeds the query once).
+pub fn query(ctx: &Context, needle: &str, json: bool, styles: &Styles) -> Result<i32> {
+    let Some(index) = load_index(ctx)? else {
+        eprintln!("no semantic index; run `slice semantic-index` first");
+        return Ok(1);
+    };
+    if index.units.is_empty() {
+        eprintln!("semantic index is empty; rebuild with `slice semantic-index`");
+        return Ok(1);
+    }
+
+    // Embed the query with the SAME model/dims the index was built with — vectors are only comparable
+    // within one model.
+    let embedder = OpenRouterEmbedder::from_env(index.model.clone(), index.dims)?;
+    let q = needle.to_owned();
+    let qvec = embedder
+        .embed(std::slice::from_ref(&q))?
+        .pop()
+        .ok_or_else(|| Error::Embedding("no embedding returned for query".to_owned()))?;
+
+    let docs = load_slice_docs(ctx)?;
+    let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
+    let mut revdep: FxHashMap<&str, usize> = FxHashMap::default();
+    for d in &docs {
+        for dep in &d.dependencies {
+            *revdep.entry(dep.as_str()).or_default() += 1;
+        }
+    }
+
+    // Candidate generation: cosine over every unit, keep the top-K units.
+    let mut scored: Vec<(usize, f32)> = index
+        .units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (i, cosine(&qvec, &u.vector)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    scored.truncate(CANDIDATES);
+
+    // Aggregate candidates to slices: best unit (the representative) + breadth (matched-unit count).
+    let mut by_slice: FxHashMap<&str, Agg> = FxHashMap::default();
+    for (i, score) in &scored {
+        let u = &index.units[*i];
+        let entry = by_slice.entry(u.slice_id.as_str()).or_insert(Agg {
+            rep: u,
+            score: *score,
+            breadth: 0,
+        });
+        entry.breadth += 1;
+        if *score > entry.score {
+            entry.score = *score;
+            entry.rep = u;
+        }
+    }
+
+    // Build each hit with its deterministic sort keys captured alongside, then re-rank.
+    let mut ranked: Vec<Ranked> = by_slice
+        .iter()
+        .map(|(sid, agg)| {
+            let (files, freshness): (&[String], &'static str) = match by_id.get(sid) {
+                None => (&[], "missing"),
+                Some(d) if slice_fingerprint(ctx, d) == agg.rep.slice_fp => {
+                    (d.files.as_slice(), "fresh")
+                }
+                Some(d) => (d.files.as_slice(), "stale"),
+            };
+            Ranked {
+                fresh: freshness == "fresh",
+                breadth: agg.breadth,
+                revdep: revdep.get(sid).copied().unwrap_or(0),
+                hit: Hit {
+                    slice_id: sid,
+                    files,
+                    freshness,
+                    kind: &agg.rep.kind,
+                    text: &agg.rep.text,
+                    score: agg.score,
+                },
+            }
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        rank_cmp(
+            (a.fresh, a.breadth, a.revdep, a.hit.score, a.hit.slice_id),
+            (b.fresh, b.breadth, b.revdep, b.hit.score, b.hit.slice_id),
+        )
+    });
+    ranked.truncate(SHOW);
+    let hits: Vec<Hit> = ranked.into_iter().map(|r| r.hit).collect();
+
+    if json {
+        emit_json(&hits)?;
+        return Ok(i32::from(hits.is_empty()));
+    }
+    if hits.is_empty() {
+        eprintln!("no semantic matches for: {needle}");
+        return Ok(1);
+    }
+    print_hits(&hits, styles);
+    Ok(0)
+}
+
+/// Human output: one line per hit — `slice_id  [freshness]  files  — kind: reason (sim score)`.
+fn print_hits(hits: &[Hit], styles: &Styles) {
+    let width = hits.iter().map(|h| h.slice_id.len()).max().unwrap_or(0);
+    for h in hits {
+        let pad = " ".repeat(width.saturating_sub(h.slice_id.len()));
+        let tag = styles.paint(styles.label, &format!("[{}]", h.freshness));
+        let files = if h.files.is_empty() {
+            "(no files)".to_owned()
+        } else {
+            h.files.join(", ")
+        };
+        println!(
+            "{}{pad}  {tag}  {files}  — {}: {} (sim {:.2})",
+            styles.paint(styles.id, h.slice_id),
+            h.kind,
+            snippet(h.text),
+            h.score,
+        );
+    }
+}
+
+/// One-line preview of a unit's text for the human "reason" column.
+fn snippet(text: &str) -> String {
+    const MAX: usize = 60;
+    let one_line = text.replace('\n', " ");
+    if one_line.chars().count() <= MAX {
+        return one_line;
+    }
+    let cut: String = one_line.chars().take(MAX).collect();
+    format!("{cut}…")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +527,57 @@ mod tests {
         assert_eq!(back.units[0].slice_id, "auth");
         assert_eq!(back.units[0].vector, vec![0.5, -0.25]);
         assert_eq!(back.units[0].anchor.as_deref(), Some("src/auth.py:10"));
+    }
+
+    #[test]
+    fn cosine_is_1_for_identical_0_for_orthogonal_and_safe_on_zero() {
+        assert!((cosine(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        assert!(cosine(&[0.0, 0.0], &[1.0, 1.0]).abs() < f32::EPSILON); // zero vector → 0, not NaN
+    }
+
+    /// Sort a set of `(fresh, breadth, revdep, score, id)` rows with `rank_cmp` and return the id order.
+    fn order(mut rows: Vec<(bool, usize, usize, f32, &str)>) -> Vec<&str> {
+        rows.sort_by(|a, b| rank_cmp(*a, *b));
+        rows.into_iter().map(|r| r.4).collect()
+    }
+
+    #[test]
+    fn rank_freshness_and_topology_own_the_order_cosine_only_breaks_ties() {
+        // A stale hit is demoted below a fresh one even with far higher cosine.
+        assert_eq!(
+            order(vec![
+                (false, 9, 9, 0.99, "stale"),
+                (true, 1, 0, 0.10, "fresh")
+            ]),
+            vec!["fresh", "stale"]
+        );
+        // Among fresh hits: more matched units (breadth) outranks more cosine.
+        assert_eq!(
+            order(vec![
+                (true, 1, 0, 0.99, "narrow"),
+                (true, 3, 0, 0.20, "broad")
+            ]),
+            vec!["broad", "narrow"]
+        );
+        // Equal fresh+breadth: more depended-upon (reverse-dep) outranks cosine.
+        assert_eq!(
+            order(vec![(true, 2, 0, 0.99, "leaf"), (true, 2, 5, 0.20, "core")]),
+            vec!["core", "leaf"]
+        );
+        // Only when fresh+breadth+revdep all tie does cosine decide, then slice_id for stability.
+        assert_eq!(
+            order(vec![(true, 1, 0, 0.30, "b"), (true, 1, 0, 0.80, "a")]),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn snippet_flattens_newlines_and_truncates() {
+        assert_eq!(snippet("short text"), "short text");
+        assert_eq!(snippet("line one\nline two"), "line one line two");
+        let long = "x".repeat(80);
+        let s = snippet(&long);
+        assert!(s.ends_with('…') && s.chars().count() == 61); // 60 chars + ellipsis
     }
 }

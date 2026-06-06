@@ -60,6 +60,27 @@ enum Command {
         json: bool,
     },
 
+    /// Outline a file's symbols (definitions + line spans).
+    #[command(
+        after_help = "Each row is file:start-end\\tname; the trailing `coverage: N/M definitions \
+                      spanned` declares how many detected definitions the heuristic could confidently \
+                      span — ambiguous cases (decorators, nested functions, multi-line signatures, \
+                      tab indent) are skipped, not guessed, so a low ratio is a real signal, not noise."
+    )]
+    Outline {
+        /// Source file to outline (any tracked file; slice membership not required).
+        file: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the symbols defined across a slice's files (with declared coverage).
+    Symbols {
+        selector: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show slice dependencies.
     Deps {
         selector: String,
@@ -257,6 +278,8 @@ fn run_inner(args: Args) -> Result<i32> {
             commands::show(&ctx, &selector, mode, json, &styles)
         }
         Command::Files { selector, json } => commands::files(&ctx, &selector, json),
+        Command::Outline { file, json } => commands::outline(&ctx, &file, json),
+        Command::Symbols { selector, json } => commands::symbols(&ctx, &selector, json),
         Command::Deps {
             selector,
             reverse,

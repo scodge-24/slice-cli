@@ -15,8 +15,8 @@ use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
 use crate::manifest::{load_doc_manifest, save_doc_manifest};
 use crate::models::{
     AffectedDoc, CollaboratorFile, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch,
-    ListRow, ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc,
-    TrackedDocSummary,
+    ListRow, ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, SymbolRow, SymbolsOutput,
+    TrackedDoc, TrackedDocSummary,
 };
 use crate::paths::{expand_literal_or_existing, matches_path, repo_join};
 use crate::slices::{
@@ -279,6 +279,81 @@ fn collaborator_files(dependency_ids: &[String], docs: &[SliceDoc]) -> Vec<Colla
         }
     }
     out
+}
+
+/// Shared core for `outline`/`symbols`: enumerate each source's confidently-spanned definitions into
+/// rows and accumulate declared coverage (`spanned` confidently delimited vs. `total` detected).
+fn collect_symbols(sources: &[SliceSource]) -> (Vec<SymbolRow>, usize, usize) {
+    let mut rows = Vec::new();
+    let mut spanned = 0usize;
+    let mut total = 0usize;
+    for (rel, lang, content) in sources {
+        let (syms, skipped) = crate::symbols::enumerate_symbols(content, *lang);
+        spanned += syms.len();
+        total += syms.len() + skipped;
+        for s in syms {
+            rows.push(SymbolRow {
+                file: rel.clone(),
+                name: s.name,
+                start: s.start,
+                end: s.end,
+            });
+        }
+    }
+    (rows, spanned, total)
+}
+
+/// Emit an enumerated symbol surface. Human rows are `file:start-end<TAB>name` (evidence-layer
+/// `file:line` provenance, directly readable); the trailing `coverage:` line is the mandatory
+/// declared-coverage signal — always printed, even at `0/0`, so a sparse or empty result is never
+/// mistaken for "no symbols here."
+fn emit_symbols(
+    selector: &str,
+    rows: Vec<SymbolRow>,
+    spanned: usize,
+    total: usize,
+    json: bool,
+) -> Result<i32> {
+    if json {
+        emit_json(&SymbolsOutput {
+            selector,
+            symbols: rows,
+            spanned,
+            total,
+        })?;
+    } else {
+        for r in &rows {
+            println!("{}:{}-{}\t{}", r.file, r.start, r.end, r.name);
+        }
+        println!("coverage: {spanned}/{total} definitions spanned");
+    }
+    Ok(0)
+}
+
+/// `outline <file>` — every definition in one file the heuristic can confidently span, with declared
+/// coverage. Works on any source file (no slice membership required). Symbol-orientation surface
+/// (plan Stage 2): file-level enumeration, not the point queries `grep --symbols`/`show` use.
+pub fn outline(ctx: &Context, file: &str, json: bool) -> Result<i32> {
+    let rel = crate::paths::normalize_repo_path(file, ctx);
+    let Some(lang) = crate::symbols::lang_for_path(&rel) else {
+        eprintln!("{rel}: unsupported file type for symbol outline");
+        return Ok(1);
+    };
+    let content = std::fs::read_to_string(repo_join(ctx, &rel)).map_err(Error::Io)?;
+    let sources = vec![(rel.clone(), lang, content)];
+    let (rows, spanned, total) = collect_symbols(&sources);
+    emit_symbols(&rel, rows, spanned, total, json)
+}
+
+/// `symbols <slice>` — every confidently-spanned definition across a slice's files, with declared
+/// coverage aggregated over the slice. Reuses `read_slice_sources` (skips unsupported/unreadable
+/// files), so a slice of only unsupported files reports an honest `0/0`.
+pub fn symbols(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
+    let docs = load_slice_docs_meta(ctx)?;
+    let doc = require_slice(&docs, selector)?;
+    let sources = read_slice_sources(ctx, &doc.files);
+    let (rows, spanned, total) = collect_symbols(&sources);
+    emit_symbols(&doc.slice_id, rows, spanned, total, json)
 }
 
 /// Slices that reference `path` as a Verification target (e.g. a test file), used as a fallback for

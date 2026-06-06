@@ -73,6 +73,40 @@ pub fn definition_span(content: &str, name: &str, lang: Lang) -> Option<(usize, 
     Some((sym.start, sym.end))
 }
 
+/// Enumerate every definition in `content` the heuristic can confidently span, in line order, plus
+/// the count of definition lines it had to **skip** (decorators, multi-line signatures, nested
+/// functions, tab indentation — the same reject-on-ambiguity cases the point queries refuse).
+///
+/// The skip count is not incidental: it is the **declared-coverage** signal. An outline that
+/// silently omits a decorated or multi-line def reads as complete when it isn't — worse than no
+/// outline. Callers MUST surface `(found.len(), found.len() + skipped)` so the consumer knows how
+/// much of the file went unrepresented. When declared coverage is too low to trust on real repos,
+/// that is itself the evidence that would gate an AST backend.
+#[must_use]
+pub fn enumerate_symbols(content: &str, lang: Lang) -> (Vec<Symbol>, usize) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut found = Vec::new();
+    let mut skipped = 0usize;
+    for (i, raw) in lines.iter().enumerate() {
+        let is_def = match lang {
+            Lang::Python => py_def_name(raw).is_some(),
+            Lang::Brace => brace_def_name(raw).is_some(),
+        };
+        if !is_def {
+            continue;
+        }
+        let span = match lang {
+            Lang::Python => py_span_from_def(&lines, i),
+            Lang::Brace => brace_span_from_def(&lines, i),
+        };
+        match span {
+            Some(sym) => found.push(sym),
+            None => skipped += 1,
+        }
+    }
+    (found, skipped)
+}
+
 // --- Python (indentation-based) -------------------------------------------------------------
 
 enum Lead {
@@ -404,5 +438,49 @@ class C:
         assert_eq!(lang_for_path("a/b/c.py"), Some(Lang::Python));
         assert_eq!(lang_for_path("src/main.rs"), Some(Lang::Brace));
         assert_eq!(lang_for_path("README.md"), None);
+    }
+
+    #[test]
+    fn enumerate_python_finds_top_level_and_methods() {
+        let (syms, skipped) = enumerate_symbols(PY, Lang::Python);
+        let got: Vec<(&str, usize, usize)> = syms
+            .iter()
+            .map(|s| (s.name.as_str(), s.start, s.end))
+            .collect();
+        // top (1-3), class C (6-8), method (7-8) — all confidently spanned, in line order.
+        assert_eq!(got, vec![("top", 1, 3), ("C", 6, 8), ("method", 7, 8)]);
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn enumerate_counts_unspannable_defs_as_skipped() {
+        // A decorated def cannot be spanned (the real start is ambiguous), so it counts toward the
+        // declared-coverage gap rather than silently vanishing: found={clean}, skipped={decorated}.
+        let src = "@deco\ndef decorated():\n    return 1\n\ndef clean():\n    return 2\n";
+        let (syms, skipped) = enumerate_symbols(src, Lang::Python);
+        assert_eq!(
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["clean"]
+        );
+        assert_eq!(skipped, 1); // declared coverage = 1/2
+    }
+
+    #[test]
+    fn enumerate_brace_orders_and_skips_kr_brace() {
+        // `spanned` (brace on the def line) is found; `kr` (K&R next-line brace) is unspannable.
+        let src = "fn spanned() {\n    work();\n}\n\nfn kr()\n{\n    work();\n}\n";
+        let (syms, skipped) = enumerate_symbols(src, Lang::Brace);
+        assert_eq!(
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["spanned"]
+        );
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn enumerate_empty_is_empty() {
+        let (syms, skipped) = enumerate_symbols("import os\nx = 1\n", Lang::Python);
+        assert!(syms.is_empty());
+        assert_eq!(skipped, 0);
     }
 }

@@ -97,6 +97,27 @@ pub struct CollaboratorFile {
     pub file: String,
 }
 
+/// Output of `outline <file>` / `symbols <slice>` — an enumerated symbol surface with **declared
+/// coverage**. `spanned`/`total` count definition lines confidently spanned vs. detected; the gap
+/// is the heuristic's reject-on-ambiguity skips, surfaced so a partial outline never reads as
+/// complete. Each row carries `file:start-end` (evidence-layer provenance).
+#[derive(Debug, Serialize)]
+pub struct SymbolsOutput<'a> {
+    pub selector: &'a str,
+    pub symbols: Vec<SymbolRow>,
+    pub spanned: usize,
+    pub total: usize,
+}
+
+/// One enumerated definition: its owning file and 1-based inclusive line span.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SymbolRow {
+    pub file: String,
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FindMatch<'a> {
     pub description: &'a str,

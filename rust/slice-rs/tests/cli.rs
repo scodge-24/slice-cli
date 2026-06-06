@@ -1972,3 +1972,86 @@ fn show_omits_overview_when_slice_has_no_lede() {
         "overview json field is empty when there is no lede"
     );
 }
+
+// Fixture for the symbol-orientation surfaces (Stage 2): one file with a confidently-spannable
+// top-level def, a class + method, and a decorated def the heuristic must skip (exercising declared
+// coverage), plus a second file so `symbols <slice>` aggregates across files.
+fn symbols_fixture() -> TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/mod.py"),
+        "def top():\n    return 1\n\n\nclass C:\n    def method(self):\n        return 2\n\n\n@deco\ndef decorated():\n    return 3\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/other.py"), "def helper():\n    return 0\n").unwrap();
+    std::fs::create_dir_all(repo.join("slices")).unwrap();
+    std::fs::write(
+        repo.join("slices/m.md"),
+        "---\nslice_id: m\ndescription: M\nfiles:\n  - src/mod.py\n  - src/other.py\n---\n",
+    )
+    .unwrap();
+    run_git(repo, &["init"]);
+    temp
+}
+
+#[test]
+fn outline_anchors_symbols_and_declares_coverage() {
+    let temp = symbols_fixture();
+    let repo = temp.path();
+
+    // Human: file:start-end<TAB>name per confidently-spanned def, in line order, then the mandatory
+    // declared-coverage line. The decorated def is skipped (4 detected, 3 spanned) — surfaced as 3/4,
+    // never silently dropped.
+    let human = run_rust_raw_for_repo(repo, &["outline", "src/mod.py"]);
+    assert_eq!(human.0, 0);
+    assert_eq!(
+        stdout_text(&human),
+        "src/mod.py:1-2\ttop\nsrc/mod.py:5-7\tC\nsrc/mod.py:6-7\tmethod\ncoverage: 3/4 definitions spanned\n"
+    );
+
+    // JSON carries the same rows + the spanned/total counts.
+    let (status, value) = run_rust_for_repo(repo, &["outline", "src/mod.py", "--json"]);
+    assert_eq!(status, 0);
+    assert_eq!(value["selector"], "src/mod.py");
+    assert_eq!(value["spanned"], 3);
+    assert_eq!(value["total"], 4);
+    assert_eq!(
+        value["symbols"],
+        json!([
+            {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
+            {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
+            {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
+        ])
+    );
+
+    // An unsupported file type is a soft exit 1 with a stderr note, not a crash or a false "0/0".
+    let md = run_rust_raw_for_repo(repo, &["outline", "slices/m.md"]);
+    assert_eq!(md.0, 1);
+    assert!(stderr_text(&md).contains("unsupported file type"));
+}
+
+#[test]
+fn symbols_aggregates_declared_coverage_across_slice_files() {
+    let temp = symbols_fixture();
+    let repo = temp.path();
+
+    // `symbols <slice>` unions every file the slice owns: mod.py (top, C, method) + other.py (helper),
+    // with coverage aggregated over the slice (4 spanned of 5 detected — the decorated def skipped).
+    let human = run_rust_raw_for_repo(repo, &["symbols", "m"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(text.contains("src/mod.py:1-2\ttop"), "got:\n{text}");
+    assert!(text.contains("src/other.py:1-2\thelper"), "got:\n{text}");
+    assert!(
+        text.contains("coverage: 4/5 definitions spanned"),
+        "aggregate declared coverage across the slice; got:\n{text}"
+    );
+
+    let (status, value) = run_rust_for_repo(repo, &["symbols", "m", "--json"]);
+    assert_eq!(status, 0);
+    assert_eq!(value["selector"], "m");
+    assert_eq!(value["spanned"], 4);
+    assert_eq!(value["total"], 5);
+}

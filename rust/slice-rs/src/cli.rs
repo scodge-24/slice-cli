@@ -231,6 +231,20 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Build the semantic embedding index over slice-anchored units (writes slices/SEMANTIC.json).
+    ///
+    /// Requires the `semantic` build feature and an `OPENROUTER_API_KEY`. The index is slice-owned,
+    /// regenerable state; rebuild it after slices change.
+    #[cfg(feature = "semantic")]
+    SemanticIndex {
+        /// Embedding model (default: openai/text-embedding-3-small).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding dimensions (default: 512; only models supporting reduction honour it).
+        #[arg(long)]
+        dimensions: Option<usize>,
+    },
 }
 
 pub fn run() -> anyhow::Result<i32> {
@@ -378,5 +392,9 @@ fn run_inner(args: Args) -> Result<i32> {
             dry_run,
             force,
         } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
+        #[cfg(feature = "semantic")]
+        Command::SemanticIndex { model, dimensions } => {
+            crate::semantic::build_index(&ctx, model, dimensions)
+        }
     }
 }

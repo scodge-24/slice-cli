@@ -88,9 +88,6 @@ Wait for ALL refine agents to complete before Phase 3.
    ```
    `--require-verification` makes a card with an unverified abstraction a hard error
    (non-zero exit), so this is a real quality gate, not advisory output.
-   If `slices/SEMANTIC*.json` exists, the freshly written cards have made the embedding
-   index stale — rebuild with `slice semantic-index --units code` (needs the `semantic`
-   binary feature + `OPENROUTER_API_KEY`), or tell the user it needs a rebuild.
    - **Pass**: proceed.
    - **Fail**: read the error output, fix the offending slice files, re-run until it passes.
      Common fixes: resolve overlapping file assignments (assign to the slice with stronger
@@ -119,6 +116,17 @@ Wait for ALL refine agents to complete before Phase 3.
    ```
    slice sync-index
    ```
+
+4. **Build the semantic index** — so `slice locate` and `slice find --semantic` work on this
+   repo from the start (without it, those commands exit 1 with a "run `slice semantic-index`
+   first" hint). This is also the rebuild after a re-slice: freshly written cards make any
+   existing index stale.
+   ```
+   slice semantic-index --units code
+   ```
+   Needs the `semantic` build feature **and** `OPENROUTER_API_KEY`, and makes one embedding
+   API call per ≤96-unit chunk. If the binary lacks the feature or the key is unset, skip the
+   build and tell the user the index wasn't built and to run the command above once it is.
 
 </important>
 

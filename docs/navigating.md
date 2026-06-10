@@ -89,8 +89,8 @@ look off-topic.
 `--units cards` embeds each slice's description + abstractions; `--units code` embeds the
 source symbols themselves, so every hit carries the matching symbol's `file:line`. The vector
 score is only a candidate generator — the final ranking is deterministic (owning slice,
-reverse-dependency distance, freshness), and a hit whose owning slice has drifted since the
-index was built is flagged stale rather than silently returned.
+reverse-dependency count (fan-in), freshness), and a hit whose owning slice has drifted since
+the index was built is flagged stale rather than silently returned.
 
 To grep the actual source files owned by a slice:
 

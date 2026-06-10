@@ -226,7 +226,7 @@ pub fn deps(
 
     // `--files` resolves the dependency slices to their concrete files — the blast-radius
     // "candidate file discovery" hop. Opt-in, so the default output is unchanged.
-    let collaborator_files = files.then(|| collaborator_files(&dependencies, &docs));
+    let collaborator_files = files.then(|| collaborator_files(ctx, &dependencies, &docs));
 
     if json {
         emit_json(&DepsOutput {
@@ -254,14 +254,18 @@ pub fn deps(
 /// Scoping rule (the unit test is the spec):
 /// - output order follows `dependency_ids`, which for `--reverse --transitive` is BFS distance order
 ///   (nearest collaborators first) — so ranking is by reverse-dep distance;
-/// - within a slice, files keep their declared order;
+/// - each `files:` entry is expanded (`files:` supports globs), keeping declared order across entries;
 /// - a file owned by several collaborators is emitted **once**, attributed to the first (nearest)
 ///   slice that owns it.
 ///
 /// No cap: dropping a collaborator file could hide gold (the kill-condition concern). Dedupe +
 /// distance ranking is the scoping; over-pull is handled by the gated anchoring escalation, never by
 /// silently truncating here.
-fn collaborator_files(dependency_ids: &[String], docs: &[SliceDoc]) -> Vec<CollaboratorFile> {
+fn collaborator_files(
+    ctx: &Context,
+    dependency_ids: &[String],
+    docs: &[SliceDoc],
+) -> Vec<CollaboratorFile> {
     let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
     let mut seen = FxHashSet::default();
     let mut out = Vec::new();
@@ -270,11 +274,16 @@ fn collaborator_files(dependency_ids: &[String], docs: &[SliceDoc]) -> Vec<Colla
             continue; // dependency id with no matching slice doc — nothing to list
         };
         for file in &doc.files {
-            if seen.insert(file.clone()) {
-                out.push(CollaboratorFile {
-                    slice_id: doc.slice_id.clone(),
-                    file: file.clone(),
-                });
+            // `files:` entries may be globs; expand to concrete repo paths so the output (and the
+            // affordance counts that reuse this) stay file-level, never raw patterns. A non-glob
+            // entry passes through as itself.
+            for resolved in expand_literal_or_existing(file, ctx) {
+                if seen.insert(resolved.clone()) {
+                    out.push(CollaboratorFile {
+                        slice_id: doc.slice_id.clone(),
+                        file: resolved,
+                    });
+                }
             }
         }
     }
@@ -631,7 +640,7 @@ pub fn context(
             let plural = |n: usize| if n == 1 { "" } else { "s" };
             let forward = transitive_deps(&doc.slice_id, &docs);
             if !forward.is_empty() {
-                let n_files = collaborator_files(&forward, &docs).len();
+                let n_files = collaborator_files(ctx, &forward, &docs).len();
                 let n_slices = forward.len();
                 println!(
                     "depends-on: {n_files} file{} in {n_slices} slice{} this relies on — slice deps {} --transitive --files",
@@ -642,7 +651,7 @@ pub fn context(
             }
             let blast = transitive_reverse_deps(&doc.slice_id, &docs);
             if !blast.is_empty() {
-                let n_files = collaborator_files(&blast, &docs).len();
+                let n_files = collaborator_files(ctx, &blast, &docs).len();
                 let n_slices = blast.len();
                 println!(
                     "blast-radius: {n_files} file{} in {n_slices} reverse-dep slice{} — slice deps {} --reverse --transitive --files",
@@ -2140,6 +2149,7 @@ mod tests {
         slice_lede,
     };
     use crate::color::{ColorChoice, Styles};
+    use crate::context::Context;
     use crate::models::{CollaboratorFile, SliceDoc};
 
     fn slice(id: &str, description: &str, loc: Option<u64>) -> SliceDoc {
@@ -2164,8 +2174,16 @@ mod tests {
         c.files = vec!["src/shared.rs".to_owned(), "src/c.rs".to_owned()];
         let docs = vec![b, c];
 
+        // Literal (non-glob) files pass through expansion unchanged; the ctx repo root is unused here.
+        let ctx = Context::from_parts_for_test(
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo/.git"),
+            PathBuf::from("/repo/slices"),
+        );
+
         // dependency_ids arrive in distance order (nearest first): chain-b, then chain-c.
-        let out = super::collaborator_files(&["chain-b".to_owned(), "chain-c".to_owned()], &docs);
+        let out =
+            super::collaborator_files(&ctx, &["chain-b".to_owned(), "chain-c".to_owned()], &docs);
         assert_eq!(
             out,
             vec![
@@ -2187,9 +2205,9 @@ mod tests {
         );
 
         // Empty blast radius → empty output (the caller turns this into an exit-0 empty list).
-        assert!(super::collaborator_files(&[], &docs).is_empty());
+        assert!(super::collaborator_files(&ctx, &[], &docs).is_empty());
         // An unknown dependency id is skipped, not an error.
-        assert!(super::collaborator_files(&["ghost".to_owned()], &docs).is_empty());
+        assert!(super::collaborator_files(&ctx, &["ghost".to_owned()], &docs).is_empty());
     }
 
     #[test]

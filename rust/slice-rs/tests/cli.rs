@@ -832,6 +832,45 @@ fn deps_files_lists_blast_radius_deduped_ordered_and_additive() {
 }
 
 #[test]
+fn deps_files_expands_glob_owned_files_to_concrete_paths() {
+    // A collaborator slice can declare its `files:` as a glob; `--files` must resolve it to the
+    // concrete matching files (the actionable read targets), never emit the raw pattern — which
+    // would also miscount the `depends-on:`/`blast-radius:` affordance.
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("src/lib")).unwrap();
+    for name in ["one", "two"] {
+        std::fs::write(repo.join(format!("src/lib/{name}.rs")), "// x\n").unwrap();
+    }
+    std::fs::write(repo.join("src/root.rs"), "// x\n").unwrap();
+    std::fs::write(
+        repo.join("slices/globlib.md"),
+        "---\nslice_id: globlib\ndescription: Lib\nfiles:\n  - src/lib/*.rs\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/globroot.md"),
+        "---\nslice_id: globroot\ndescription: Root\nfiles:\n  - src/root.rs\ndependencies:\n  - globlib\n---\n",
+    )
+    .unwrap();
+
+    let out = run_rust_for_repo(
+        repo,
+        &["deps", "globroot", "--transitive", "--files", "--json"],
+    );
+    assert_eq!(out.0, 0);
+    // The glob `src/lib/*.rs` resolves to its two concrete files (sorted), attributed to globlib —
+    // the raw pattern never appears in the output.
+    assert_eq!(
+        out.1["files"],
+        json!([
+            {"slice_id": "globlib", "file": "src/lib/one.rs"},
+            {"slice_id": "globlib", "file": "src/lib/two.rs"},
+        ])
+    );
+}
+
+#[test]
 fn context_human_advertises_both_dependency_directions_but_json_is_unchanged() {
     let temp = chain_fixture();
     let repo = temp.path();

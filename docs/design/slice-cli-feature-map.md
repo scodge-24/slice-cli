@@ -4,8 +4,8 @@ A single reference that inventories everything the `slice` CLI does today: every
 build feature, the data model underneath, and a pointer to the benchmark evidence for each. Written
 2026-06-06. It is a **snapshot for reasoning about the surface** (notably the feature-overlap question)
 — not a spec and not a roadmap. The roadmap/rationale lives in
-[`agentic-search-incorporation-plan.md`](agentic-search-incorporation-plan.md); the evidence lives in
-the sibling repo's [`FINDINGS.md`](../../slice-cli-benchmark/FINDINGS.md) (line numbers below are a
+[`agentic-search-incorporation-plan.md`](../../design/agentic-search-incorporation-plan.md); the evidence lives in
+the sibling repo's [`FINDINGS.md`](../../../slice-cli-benchmark/FINDINGS.md) (line numbers below are a
 2026-06-06 snapshot of that file and will drift).
 
 ## What the tool is
@@ -101,7 +101,7 @@ toggle so its cost is opt-in.
 
 ## The agentic-search stages (how features map to the research arc)
 
-The plan ([`agentic-search-incorporation-plan.md`](agentic-search-incorporation-plan.md)) drives the
+The plan ([`agentic-search-incorporation-plan.md`](../../design/agentic-search-incorporation-plan.md)) drives the
 recent feature work. Status as of 2026-06-06:
 
 | stage | surface | status | verdict (evidence) |

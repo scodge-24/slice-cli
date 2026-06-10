@@ -10,10 +10,11 @@ CLI tool for navigating codebase slice documents with doc-staleness tracking. Tu
   tmp dirs.
 - `examples/mock-repo/` — a self-contained demo repo the CLI runs against (`src/` mock code, `slices/` definitions + `DOCS.yaml`, `docs/` tracked docs). Run it with `slice --repo examples/mock-repo <cmd>`. This is sample data, NOT documentation about the tool.
 - `docs/` — user-facing tool documentation: architecture, manifest schema, agent
-  workflows, verification links.
-- `design/` — committed planning/evidence notes (feature maps, incorporation plans,
-  review records). The empirical evidence trail lives in the sibling
-  `slice-cli-benchmark` repo (`FINDINGS.md`).
+  workflows, verification links. `docs/design/` holds the committed planning/evidence
+  records (feature maps, incorporation plans, review records).
+- `design/` — local-only planning scratch (gitignored, not published). Finalized
+  records are promoted into `docs/design/`. The empirical evidence trail lives in the
+  sibling `slice-cli-benchmark` repo (`FINDINGS.md`).
 
 ## Dev
 

@@ -1,7 +1,7 @@
 # Agent-Facing Surface Consolidation Plan (v2, reviewed)
 
 Status: draft, 2026-06-06.
-Supersedes: [`agent-facing-surface-consolidation-plan.md`](agent-facing-surface-consolidation-plan.md)
+Supersedes: [`agent-facing-surface-consolidation-plan.md`](../../design/agent-facing-surface-consolidation-plan.md)
 (original kept as the pre-review record).
 
 > **What changed vs the original.** This revision folds in a `/plan-eng-review` pass and an

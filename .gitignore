@@ -5,8 +5,8 @@ __pycache__/
 trash/
 # semantic embedding index — regenerable, model-specific, large vectors (slice semantic-index)
 SEMANTIC.json
-# local-only planning notes, not published
-design/
+# local-only planning scratch, not published — finalized records are promoted to docs/design/
+/design/
 .turbo/
 .gstack/
 target/

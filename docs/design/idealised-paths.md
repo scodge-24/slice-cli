@@ -18,7 +18,7 @@ prescriptive "after tool 1 call tool 2" playbook — the ideal path is obvious a
 reconstruct it. The point is the **force diagram**: why, given the obvious path, the agent reliably
 drifts off it. Every weak spot we measured turned out to be a *path deviation*, not a missing tool, so
 the leverage is in understanding the forces, not adding steps. Evidence refs point at
-[`FINDINGS.md`](../../slice-cli-benchmark/FINDINGS.md) (2026-06-06 snapshot line numbers).
+[`FINDINGS.md`](../../../slice-cli-benchmark/FINDINGS.md) (2026-06-06 snapshot line numbers).
 
 ## The ideal path, in one line (the reference, not the focus)
 
@@ -135,5 +135,5 @@ already-dominant locate beat — see semantic). It is **flip the gradient on the
 In short: the lever is not the tools' *capabilities* but the *gradient their outputs create*. Today
 each tool describes itself; the fix is for each to (a) make the next beat the path of least resistance
 and (b) make the gap the agent can't see visible. That is principle (P) — affordance/ACI — stated as a
-force-balancing problem rather than a feature list. See [`agentic-search-incorporation-plan.md`](agentic-search-incorporation-plan.md)
+force-balancing problem rather than a feature list. See [`agentic-search-incorporation-plan.md`](../../design/agentic-search-incorporation-plan.md)
 §8 (L431) and the feature-map's *Feature overlap & purpose* section.

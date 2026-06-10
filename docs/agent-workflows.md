@@ -224,7 +224,9 @@ repo-setup runbook (install, agent bootstrap, optional CI/hook/agent integration
 
 | Command | Purpose |
 |---|---|
-| `slice find <needle>` | Search slice metadata + manifest tags |
+| `slice find <needle>` | Search slice metadata + manifest tags (keyword, all terms must match) |
+| `slice grep <slice> <pattern> --symbols` | Exact search scoped to one slice's files, hits tagged with their enclosing definition |
+| `slice locate "<behaviour>"` | (`semantic` builds) Behaviour you can describe but not name → read-ready `file:line` anchors + a card-match cross-check. Read its anchors before other navigation. |
 
 ## Headless vs Interactive
 

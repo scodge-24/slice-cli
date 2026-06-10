@@ -95,7 +95,7 @@ slice --repo examples/mock-repo list
 
 ## 2. Add slice state to a repo
 
-Generate slice cards under `slices/` with the `/slice-codebase` skill (see §7) or write
+Generate slice cards under `slices/` with the `/slice-codebase` skill (see §6) or write
 them by hand. Then, optionally, set up design-doc staleness tracking:
 
 ```bash
@@ -113,8 +113,10 @@ slice stamp --all           # record baseline fingerprints once the mappings loo
 - resolves a relative docs dir against the repo root, so `slice --repo <r> docs-bootstrap docs`
   works from anywhere.
 
-With a `semantic` build, also build the embedding index `slice locate` queries
-(slice-owned, regenerable state under `slices/`):
+With a `semantic` build, build the embedding index that `slice locate` queries (slice-owned,
+regenerable state under `slices/`). The `/slice-codebase` skill builds this as its final
+step (see §6), so on a `semantic` build with the key set you get an index for free; build or
+rebuild it by hand any time slices change:
 
 ```bash
 export OPENROUTER_API_KEY=...       # embeddings; the key is never written to disk
@@ -245,3 +247,7 @@ Then run `/slice-codebase` in the repo you want sliced.
 Generation needs an LSP-capable environment. Generated slices carry call-stack mapping
 (`## Runtime Flows`) and V-model verification links (`## Verification`, validated by
 `slice check`) by default — see [`verification-links.md`](verification-links.md).
+
+On a `semantic` build with `OPENROUTER_API_KEY` set, the skill also builds the code
+embedding index (`slice semantic-index --units code`) as its final step, so `slice locate`
+works on the repo immediately; otherwise it tells the user the index still needs building.

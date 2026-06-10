@@ -11,11 +11,9 @@ CLI tool for navigating codebase slice documents with doc-staleness tracking. Tu
 - `examples/mock-repo/` — a self-contained demo repo the CLI runs against (`src/` mock code, `slices/` definitions + `DOCS.yaml`, `docs/` tracked docs). Run it with `slice --repo examples/mock-repo <cmd>`. This is sample data, NOT documentation about the tool.
 - `docs/` — user-facing tool documentation: architecture, manifest schema, agent
   workflows, verification links.
-- `design/` — local-only planning notes (gitignored, not published): the
-  Python→Rust migration plans and scratch.
-
-slice-cli was originally written in Python and ported to Rust; the Python
-implementation is preserved at tag `python-impl-final` / branch `package-refactor`.
+- `design/` — committed planning/evidence notes (feature maps, incorporation plans,
+  review records). The empirical evidence trail lives in the sibling
+  `slice-cli-benchmark` repo (`FINDINGS.md`).
 
 ## Dev
 
@@ -44,6 +42,8 @@ implementation is preserved at tag `python-impl-final` / branch `package-refacto
 | slice parsing + fingerprinting | `slices.rs`, `index.rs` |
 | doc manifest load/save | `manifest.rs` |
 | command handlers (list/show/stale/affected/stamp/…) | `commands.rs` |
+| symbol spans (outline/symbols; heuristic + AST backends) | `symbols.rs`, `symbols_ast.rs` |
+| semantic index + `locate` / `find --semantic` (feature `semantic`) | `semantic.rs` |
 | validation (`slice check`) + verification links | `check.rs` |
 | config (context ambiguity) | `config.rs` |
 | CLI wiring / arg parsing | `cli.rs` |

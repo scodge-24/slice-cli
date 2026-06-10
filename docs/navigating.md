@@ -75,8 +75,16 @@ meaning instead of keyword. Built only with the `semantic` feature; needs `OPENR
 
 ```bash
 slice semantic-index --units code      # build the embedding index once (regenerable, slice-owned)
-slice find "reject an empty blueprint name" --semantic --units code
+slice locate "reject an empty blueprint name"            # the composite discovery path (start here)
+slice find "reject an empty blueprint name" --semantic --units code   # the raw semantic lens
 ```
+
+`locate` is the one-call discovery path for behaviour you can describe but not name: the top
+code-symbol hits as read-ready `file:line` anchors, plus a deterministic cross-check — when the
+slice-card description match points at an area the hits don't cover, the output says so
+(embedding misses are confidently wrong, not low-scored, so the check is disagreement-based,
+not a score threshold). Read the anchors first; fall back to the CHECK files only if the hits
+look off-topic.
 
 `--units cards` embeds each slice's description + abstractions; `--units code` embeds the
 source symbols themselves, so every hit carries the matching symbol's `file:line`. The vector

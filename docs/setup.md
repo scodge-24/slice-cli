@@ -132,6 +132,9 @@ Navigate:
 - `slice deps <id> --reverse --transitive` - blast radius: every slice that
   (transitively) depends on this one, before you change it.
 - `slice find <needle>` - locate a concept or abstraction across slices.
+- `slice locate "<behaviour described in words>"` - (semantic builds) one-call discovery
+  for code you can describe but not name: read-ready `file:line` anchors + a cross-check
+  when the slice cards point elsewhere. Read its anchors before other navigation.
 
 Track doc staleness:
 

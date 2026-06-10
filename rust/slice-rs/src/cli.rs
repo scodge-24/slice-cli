@@ -243,6 +243,25 @@ enum Command {
         force: bool,
     },
 
+    /// Locate code by meaning — the composite discovery path, in one call.
+    ///
+    /// For a need DESCRIBED in natural language (no symbol names required): embeds the query
+    /// against the code semantic index, returns the top hits as read-ready `file:line` anchors
+    /// with snippets, and cross-checks them against the slice-card description match — flagging
+    /// when the cards point at a different area than the embedding hits (embeddings fail
+    /// confidently, not hesitantly). Requires the `semantic` build feature and a code index
+    /// (`slice semantic-index --units code`).
+    #[cfg(feature = "semantic")]
+    Locate {
+        /// The need, described in natural language.
+        query: String,
+        /// Number of hits to return.
+        #[arg(long, default_value_t = 3)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Build the semantic embedding index over slice-anchored units (writes slices/SEMANTIC.json).
     ///
     /// Requires the `semantic` build feature and an `OPENROUTER_API_KEY`. The index is slice-owned,
@@ -420,6 +439,10 @@ fn run_inner(args: Args) -> Result<i32> {
             dry_run,
             force,
         } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
+        #[cfg(feature = "semantic")]
+        Command::Locate { query, top, json } => {
+            crate::semantic::locate(&ctx, &query, json, &styles, top)
+        }
         #[cfg(feature = "semantic")]
         Command::SemanticIndex {
             model,

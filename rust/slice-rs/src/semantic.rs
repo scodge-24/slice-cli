@@ -14,7 +14,7 @@
 
 use std::cmp::Ordering;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::color::Styles;
@@ -546,10 +546,31 @@ pub fn query(
         eprintln!("semantic index is empty; rebuild with `slice semantic-index`");
         return Ok(1);
     }
-    let code = index.unit_mode != UnitMode::Cards.label();
-
     let qvec = embed_query(&index, needle)?;
+    let hits = ranked_hits(ctx, &index, &qvec, SHOW)?;
 
+    if json {
+        emit_json(&hits)?;
+        return Ok(i32::from(hits.is_empty()));
+    }
+    if hits.is_empty() {
+        eprintln!("no semantic matches for: {needle}");
+        return Ok(1);
+    }
+    print_hits(&hits, styles);
+    Ok(0)
+}
+
+/// Candidate generation + deterministic re-rank, shared by `find --semantic` and `locate`:
+/// aggregate cosine candidates to slices (cards) or files (code), capture freshness/topology
+/// sort keys, rank, truncate to `show`.
+fn ranked_hits<'a>(
+    ctx: &Context,
+    index: &'a SemanticIndex,
+    qvec: &[f32],
+    show: usize,
+) -> Result<Vec<Hit<'a>>> {
+    let code = index.unit_mode != UnitMode::Cards.label();
     let docs = load_slice_docs(ctx)?;
     let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
     let mut revdep: FxHashMap<&str, usize> = FxHashMap::default();
@@ -559,7 +580,7 @@ pub fn query(
         }
     }
 
-    let scored = candidates(&index.units, &qvec);
+    let scored = candidates(&index.units, qvec);
 
     // Aggregate candidates by slice (cards) or by file (code): best unit + breadth (matched-unit
     // count). The owning slice (rep.slice_id) drives freshness/reverse-dep either way.
@@ -628,18 +649,138 @@ pub fn query(
             (b.fresh, b.breadth, b.revdep, b.hit.score, b.hit.slice_id),
         )
     });
-    ranked.truncate(SHOW);
-    let hits: Vec<Hit> = ranked.into_iter().map(|r| r.hit).collect();
+    ranked.truncate(show);
+    Ok(ranked.into_iter().map(|r| r.hit).collect())
+}
+
+// --- locate (the composite discovery path) ---------------------------------------------------
+
+/// Stopwords for the card-description match (mirrors the validated benchmark check).
+const LOCATE_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "that", "this", "from", "into", "when", "are", "its",
+];
+
+/// Lowercased alphabetic content words, length >= 3, minus stopwords.
+fn content_words(text: &str) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic() {
+            cur.push(ch.to_ascii_lowercase());
+        } else if !cur.is_empty() {
+            if cur.len() >= 3 && !LOCATE_STOPWORDS.contains(&cur.as_str()) {
+                out.insert(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+    }
+    if cur.len() >= 3 && !LOCATE_STOPWORDS.contains(&cur.as_str()) {
+        out.insert(cur);
+    }
+    out
+}
+
+/// The slice whose card DESCRIPTION shares the most content words with the query (ties broken by
+/// `slice_id` for determinism). The cross-check for `locate`: embedding hits fail *confidently*
+/// (measured — no score threshold separates their misses), but the card match catches exactly the
+/// subsystem-vocabulary queries they miss.
+fn card_match<'a>(docs: &'a [SliceDoc], needle: &str) -> Option<&'a SliceDoc> {
+    let toks = content_words(needle);
+    let mut best: Option<(&SliceDoc, usize)> = None;
+    for d in docs {
+        let n = content_words(&d.description).intersection(&toks).count();
+        if n == 0 {
+            continue;
+        }
+        let replace = match best {
+            None => true,
+            Some((b, bn)) => n > bn || (n == bn && d.slice_id < b.slice_id),
+        };
+        if replace {
+            best = Some((d, n));
+        }
+    }
+    best.map(|(d, _)| d)
+}
+
+#[derive(Serialize)]
+struct LocateCheck<'a> {
+    slice_id: &'a str,
+    files: &'a [String],
+}
+
+#[derive(Serialize)]
+struct LocateOut<'a> {
+    hits: Vec<Hit<'a>>,
+    /// Present when the card-description match points at a slice absent from the hits — the
+    /// deterministic "embedding may be confidently off-target" cross-check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check: Option<LocateCheck<'a>>,
+}
+
+/// `locate`: the composite discovery path, one call. Embed the query against the code index, return
+/// the top hits as read-ready `file:line` anchors, and cross-check them against the card-description
+/// match — flagging when the cards point at an area the hits don't cover.
+pub fn locate(ctx: &Context, needle: &str, json: bool, styles: &Styles, top: usize) -> Result<i32> {
+    let loaded = match load_index(ctx, UnitMode::Code)? {
+        Some(i) => Some(i),
+        None => load_index(ctx, UnitMode::CodeSliceAug)?,
+    };
+    let Some(index) = loaded else {
+        eprintln!("no code semantic index; run `slice semantic-index --units code` first");
+        return Ok(1);
+    };
+    if index.units.is_empty() {
+        eprintln!("semantic index is empty; rebuild with `slice semantic-index --units code`");
+        return Ok(1);
+    }
+    let qvec = embed_query(&index, needle)?;
+    let hits = ranked_hits(ctx, &index, &qvec, top)?;
+    let docs = load_slice_docs(ctx)?;
+    let cm = card_match(&docs, needle).filter(|d| !hits.iter().any(|h| h.slice_id == d.slice_id));
 
     if json {
-        emit_json(&hits)?;
-        return Ok(i32::from(hits.is_empty()));
+        let out = LocateOut {
+            check: cm.map(|d| LocateCheck {
+                slice_id: &d.slice_id,
+                files: &d.files,
+            }),
+            hits,
+        };
+        emit_json(&out)?;
+        return Ok(i32::from(out.hits.is_empty()));
     }
     if hits.is_empty() {
         eprintln!("no semantic matches for: {needle}");
         return Ok(1);
     }
-    print_hits(&hits, styles);
+    for h in &hits {
+        let anchor = h.anchor.unwrap_or(h.slice_id);
+        let tag = styles.paint(styles.label, &format!("[{} {}]", h.slice_id, h.freshness));
+        println!(
+            "{}  (sim {:.2})  {tag}  {}",
+            styles.paint(styles.id, anchor),
+            h.score,
+            snippet(h.text),
+        );
+    }
+    println!(
+        "Read these now: the top hits are usually the answer — read the code around each anchor."
+    );
+    if let Some(d) = cm {
+        let files = if d.files.is_empty() {
+            "(no files listed)".to_owned()
+        } else {
+            d.files.join(", ")
+        };
+        println!(
+            "CHECK: the slice-card description match points at a DIFFERENT area — slice '{}': {files}. \
+             Embedding hits are sometimes confidently off-target; if they look off-topic for the \
+             request, read these files instead.",
+            d.slice_id
+        );
+    }
     Ok(0)
 }
 
@@ -854,5 +995,61 @@ mod tests {
             UnitMode::CodeSliceAug.index_file(),
             UnitMode::Code.index_file()
         );
+    }
+}
+
+#[cfg(test)]
+mod locate_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn doc(slice_id: &str, description: &str, files: &[&str]) -> SliceDoc {
+        SliceDoc {
+            slice_id: slice_id.to_owned(),
+            doc_path: PathBuf::from(format!("slices/{slice_id}.md")),
+            description: description.to_owned(),
+            loc: None,
+            files: files.iter().map(|s| (*s).to_owned()).collect(),
+            abstractions: vec![],
+            dependencies: vec![],
+            exclusions: vec![],
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn content_words_drops_stopwords_and_short_tokens() {
+        let w = content_words("reading and writing datasets to the disk, by io!");
+        assert!(w.contains("reading") && w.contains("datasets") && w.contains("disk"));
+        assert!(!w.contains("and") && !w.contains("the") && !w.contains("to") && !w.contains("io"));
+    }
+
+    #[test]
+    fn card_match_picks_max_overlap_deterministically() {
+        let docs = vec![
+            doc("core", "array math kernels", &["src/core.py"]),
+            doc(
+                "io",
+                "reading and writing datasets to disk",
+                &["src/api.py"],
+            ),
+            doc("aaa", "reading configuration", &["src/cfg.py"]),
+        ];
+        let m = card_match(
+            &docs,
+            "reading and writing datasets to netcdf files on disk",
+        )
+        .unwrap();
+        assert_eq!(m.slice_id, "io"); // 3-word overlap beats aaa's 1
+        // tie -> lexicographic slice_id wins (determinism)
+        let tied = vec![
+            doc("bbb", "session cookies", &[]),
+            doc("aaa", "session cookies", &[]),
+        ];
+        assert_eq!(
+            card_match(&tied, "sign session cookies").unwrap().slice_id,
+            "aaa"
+        );
+        assert!(card_match(&docs, "zzz qqq").is_none()); // zero overlap -> no match
     }
 }

@@ -47,10 +47,17 @@ slice deps auth-service                       # what this slice depends on (dire
 slice deps auth-service --transitive          # …and transitively
 slice deps auth-service --reverse             # who depends on this slice (direct)
 slice deps auth-service --reverse --transitive   # the full upstream blast radius
+slice deps auth-service --reverse --transitive --files  # …as concrete files to read
 ```
 
 Run the reverse-transitive form before editing a low-level slice: it lists every slice
 that would be affected, directly or through intermediaries.
+
+Add `--files` to turn that radius into the concrete collaborator files you'd actually open —
+each tagged with the slice that owns it, nearest dependents first, deduplicated — so you read
+them directly instead of re-deriving paths from slice ids. `slice context <file>` also prints a
+one-line `blast-radius:` summary pointing at this command, so the radius is visible without
+asking for it.
 
 ## Find a concept
 
@@ -60,6 +67,30 @@ slice find idempotency      # which slices mention a concept/abstraction
 
 `find` searches slice descriptions, abstractions, and bodies, and tags each hit with where
 it matched (`[abstractions]`, `[body]`, …).
+
+### Semantic search (opt-in, `semantic` build feature)
+
+When you can't name the symbol, describe the behaviour in natural language and rank by
+meaning instead of keyword. Built only with the `semantic` feature; needs `OPENROUTER_API_KEY`.
+
+```bash
+slice semantic-index --units code      # build the embedding index once (regenerable, slice-owned)
+slice locate "reject an empty blueprint name"            # the composite discovery path (start here)
+slice find "reject an empty blueprint name" --semantic --units code   # the raw semantic lens
+```
+
+`locate` is the one-call discovery path for behaviour you can describe but not name: the top
+code-symbol hits as read-ready `file:line` anchors, plus a deterministic cross-check — when the
+slice-card description match points at an area the hits don't cover, the output says so
+(embedding misses are confidently wrong, not low-scored, so the check is disagreement-based,
+not a score threshold). Read the anchors first; fall back to the CHECK files only if the hits
+look off-topic.
+
+`--units cards` embeds each slice's description + abstractions; `--units code` embeds the
+source symbols themselves, so every hit carries the matching symbol's `file:line`. The vector
+score is only a candidate generator — the final ranking is deterministic (owning slice,
+reverse-dependency count (fan-in), freshness), and a hit whose owning slice has drifted since
+the index was built is flagged stale rather than silently returned.
 
 To grep the actual source files owned by a slice:
 

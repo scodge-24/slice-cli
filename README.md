@@ -26,6 +26,18 @@ git clone https://github.com/scodge-24/slice-cli && cd slice-cli
 cargo install --path rust/slice-rs        # installs the `slice` binary
 ```
 
+Two opt-in build features extend the surface (both off by default; the default
+build has zero network dependencies):
+
+```bash
+cargo install --path rust/slice-rs --features semantic   # locate / find --semantic / semantic-index
+cargo install --path rust/slice-rs --features ast        # Tree-sitter spans for outline/symbols
+```
+
+`semantic` commands need an `OPENROUTER_API_KEY` at runtime (embeddings); `ast`
+swaps the heuristic symbol spanner for full Tree-sitter spans (set
+`SLICE_SYMBOLS=heuristic` to force the old path).
+
 Requires `git` on PATH at runtime. `slice browse` additionally needs optional
 `fzf` (>= 0.30); every other command works without it.
 
@@ -93,7 +105,11 @@ stamped auth-guide -> 5fb503f...
 | `slice affected-docs <files…>` | Which docs a set of changed files may have made stale |
 | `slice stale-docs` | Everything currently stale (exit 1 if any — handy as a CI gate) |
 | `slice stamp <doc>` | Mark a doc verified against current code |
-| `slice list` / `show` / `for` / `find` / `deps` | Navigate slices |
+| `slice list` / `show` / `for` / `find` / `deps` | Navigate slices (`deps --files` resolves a dependency neighbourhood to concrete files) |
+| `slice grep <slice> <pattern>` | ripgrep scoped to one slice's files (`--symbols` tags hits with their enclosing definition) |
+| `slice outline <file>` / `symbols <slice>` | Every definition with its line span — jump to ranges instead of reading top-to-bottom |
+| `slice locate "<behaviour>"` | (`semantic` builds) One-call discovery for code you can describe but not name: read-ready `file:line` anchors + a cross-check when the slice cards point elsewhere |
+| `slice semantic-index` | (`semantic` builds) Build/rebuild the embedding index `locate` queries |
 | `slice browse` | Fuzzy-pick a slice with fzf, preview it inline (needs `fzf`) |
 | `slice check` | Integrity, staleness, and verification-link checks (`--require-verification` for V-model coverage) |
 | `slice docs-bootstrap <dir>` | Set up `DOCS.yaml` doc-staleness tracking from a docs directory |

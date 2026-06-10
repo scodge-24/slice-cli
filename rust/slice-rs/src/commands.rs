@@ -14,8 +14,9 @@ use crate::context::Context;
 use crate::git_backend::{GitBackend, GitChanges, ProcessGitBackend};
 use crate::manifest::{load_doc_manifest, save_doc_manifest};
 use crate::models::{
-    AffectedDoc, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch, ListRow,
-    ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, TrackedDoc, TrackedDocSummary,
+    AffectedDoc, CollaboratorFile, ContextDoc, ContextOutput, ContextSlice, DepsOutput, FindMatch,
+    ListRow, ShowSlice, SliceDoc, SliceDocStatus, SliceOwner, StaleDoc, SymbolRow, SymbolsOutput,
+    TrackedDoc, TrackedDocSummary,
 };
 use crate::paths::{expand_literal_or_existing, matches_path, repo_join};
 use crate::slices::{
@@ -192,11 +193,15 @@ pub fn files(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+// The four bools mirror `deps`' clap flags one-to-one; the only caller is the clap dispatch in
+// `cli.rs`, which destructures them by name, so there's no positional-boolean ambiguity to guard.
+#[allow(clippy::fn_params_excessive_bools)]
 pub fn deps(
     ctx: &Context,
     selector: &str,
     reverse: bool,
     transitive: bool,
+    files: bool,
     json: bool,
 ) -> Result<i32> {
     let docs = load_slice_docs_meta(ctx)?;
@@ -219,18 +224,145 @@ pub fn deps(
         (doc.dependencies.clone(), "direct")
     };
 
+    // `--files` resolves the dependency slices to their concrete files — the blast-radius
+    // "candidate file discovery" hop. Opt-in, so the default output is unchanged.
+    let collaborator_files = files.then(|| collaborator_files(ctx, &dependencies, &docs));
+
     if json {
         emit_json(&DepsOutput {
             dependencies,
             mode,
             slice_id: &doc.slice_id,
+            files: collaborator_files,
         })?;
+    } else if let Some(collaborators) = collaborator_files {
+        // File-level provenance: `file<TAB>slice_id`, the file (the actionable read target) first.
+        for cf in collaborators {
+            println!("{}\t{}", cf.file, cf.slice_id);
+        }
     } else {
         for dep in dependencies {
             println!("{dep}");
         }
     }
     Ok(0)
+}
+
+/// Resolve dependency slice ids to their concrete files for `deps --files`. File-level by design —
+/// `file:line` precision lives at the read (`grep --symbols`), per the layered-provenance invariant.
+///
+/// Scoping rule (the unit test is the spec):
+/// - output order follows `dependency_ids`, which for `--reverse --transitive` is BFS distance order
+///   (nearest collaborators first) — so ranking is by reverse-dep distance;
+/// - each `files:` entry is expanded (`files:` supports globs), keeping declared order across entries;
+/// - a file owned by several collaborators is emitted **once**, attributed to the first (nearest)
+///   slice that owns it.
+///
+/// No cap: dropping a collaborator file could hide gold (the kill-condition concern). Dedupe +
+/// distance ranking is the scoping; over-pull is handled by the gated anchoring escalation, never by
+/// silently truncating here.
+fn collaborator_files(
+    ctx: &Context,
+    dependency_ids: &[String],
+    docs: &[SliceDoc],
+) -> Vec<CollaboratorFile> {
+    let by_id: FxHashMap<&str, &SliceDoc> = docs.iter().map(|d| (d.slice_id.as_str(), d)).collect();
+    let mut seen = FxHashSet::default();
+    let mut out = Vec::new();
+    for sid in dependency_ids {
+        let Some(doc) = by_id.get(sid.as_str()) else {
+            continue; // dependency id with no matching slice doc — nothing to list
+        };
+        for file in &doc.files {
+            // `files:` entries may be globs; expand to concrete repo paths so the output (and the
+            // affordance counts that reuse this) stay file-level, never raw patterns. A non-glob
+            // entry passes through as itself.
+            for resolved in expand_literal_or_existing(file, ctx) {
+                if seen.insert(resolved.clone()) {
+                    out.push(CollaboratorFile {
+                        slice_id: doc.slice_id.clone(),
+                        file: resolved,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Shared core for `outline`/`symbols`: enumerate each source's confidently-spanned definitions into
+/// rows and accumulate declared coverage (`spanned` confidently delimited vs. `total` detected).
+fn collect_symbols(sources: &[SliceSource]) -> (Vec<SymbolRow>, usize, usize) {
+    let mut rows = Vec::new();
+    let mut spanned = 0usize;
+    let mut total = 0usize;
+    for (rel, lang, content) in sources {
+        let (syms, skipped) = crate::symbols::enumerate_symbols(content, *lang);
+        spanned += syms.len();
+        total += syms.len() + skipped;
+        for s in syms {
+            rows.push(SymbolRow {
+                file: rel.clone(),
+                name: s.name,
+                start: s.start,
+                end: s.end,
+            });
+        }
+    }
+    (rows, spanned, total)
+}
+
+/// Emit an enumerated symbol surface. Human rows are `file:start-end<TAB>name` (evidence-layer
+/// `file:line` provenance, directly readable); the trailing `coverage:` line is the mandatory
+/// declared-coverage signal — always printed, even at `0/0`, so a sparse or empty result is never
+/// mistaken for "no symbols here."
+fn emit_symbols(
+    selector: &str,
+    rows: Vec<SymbolRow>,
+    spanned: usize,
+    total: usize,
+    json: bool,
+) -> Result<i32> {
+    if json {
+        emit_json(&SymbolsOutput {
+            selector,
+            symbols: rows,
+            spanned,
+            total,
+        })?;
+    } else {
+        for r in &rows {
+            println!("{}:{}-{}\t{}", r.file, r.start, r.end, r.name);
+        }
+        println!("coverage: {spanned}/{total} definitions spanned");
+    }
+    Ok(0)
+}
+
+/// `outline <file>` — every definition in one file the heuristic can confidently span, with declared
+/// coverage. Works on any source file (no slice membership required). Symbol-orientation surface
+/// (plan Stage 2): file-level enumeration, not the point queries `grep --symbols`/`show` use.
+pub fn outline(ctx: &Context, file: &str, json: bool) -> Result<i32> {
+    let rel = crate::paths::normalize_repo_path(file, ctx);
+    let Some(lang) = crate::symbols::lang_for_path(&rel) else {
+        eprintln!("{rel}: unsupported file type for symbol outline");
+        return Ok(1);
+    };
+    let content = std::fs::read_to_string(repo_join(ctx, &rel)).map_err(Error::Io)?;
+    let sources = vec![(rel.clone(), lang, content)];
+    let (rows, spanned, total) = collect_symbols(&sources);
+    emit_symbols(&rel, rows, spanned, total, json)
+}
+
+/// `symbols <slice>` — every confidently-spanned definition across a slice's files, with declared
+/// coverage aggregated over the slice. Reuses `read_slice_sources` (skips unsupported/unreadable
+/// files), so a slice of only unsupported files reports an honest `0/0`.
+pub fn symbols(ctx: &Context, selector: &str, json: bool) -> Result<i32> {
+    let docs = load_slice_docs_meta(ctx)?;
+    let doc = require_slice(&docs, selector)?;
+    let sources = read_slice_sources(ctx, &doc.files);
+    let (rows, spanned, total) = collect_symbols(&sources);
+    emit_symbols(&doc.slice_id, rows, spanned, total, json)
 }
 
 /// Slices that reference `path` as a Verification target (e.g. a test file), used as a fallback for
@@ -499,6 +631,35 @@ pub fn context(
             println!("doc: {}", ctx.rel(&doc.doc_path));
             println!("files: {}", doc.files.join(", "));
             println!("dependencies: {}", doc.dependencies.join(", "));
+            // Affordance (principle P): advertise BOTH dependency directions factually so the agent
+            // pulls in distributed collaborators instead of brute-force grep (FINDINGS failure mode
+            // #2). Two directions because retrieval and change-impact pull opposite ways: forward
+            // deps are the code THIS slice relies on (often where distributed gold lives — the
+            // xarray-2905 confound); reverse deps are what relies on this slice (change-impact /
+            // blast radius). Human output only — the JSON contract (ContextOutput) stays byte-identical.
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            let forward = transitive_deps(&doc.slice_id, &docs);
+            if !forward.is_empty() {
+                let n_files = collaborator_files(ctx, &forward, &docs).len();
+                let n_slices = forward.len();
+                println!(
+                    "depends-on: {n_files} file{} in {n_slices} slice{} this relies on — slice deps {} --transitive --files",
+                    plural(n_files),
+                    plural(n_slices),
+                    doc.slice_id
+                );
+            }
+            let blast = transitive_reverse_deps(&doc.slice_id, &docs);
+            if !blast.is_empty() {
+                let n_files = collaborator_files(ctx, &blast, &docs).len();
+                let n_slices = blast.len();
+                println!(
+                    "blast-radius: {n_files} file{} in {n_slices} reverse-dep slice{} — slice deps {} --reverse --transitive --files",
+                    plural(n_files),
+                    plural(n_slices),
+                    doc.slice_id
+                );
+            }
             let body = load_slice_body(ctx, doc)?;
             for (heading, text) in present_sections(&body) {
                 println!("{heading}:");
@@ -1988,7 +2149,8 @@ mod tests {
         slice_lede,
     };
     use crate::color::{ColorChoice, Styles};
-    use crate::models::SliceDoc;
+    use crate::context::Context;
+    use crate::models::{CollaboratorFile, SliceDoc};
 
     fn slice(id: &str, description: &str, loc: Option<u64>) -> SliceDoc {
         SliceDoc {
@@ -2002,6 +2164,50 @@ mod tests {
             exclusions: Vec::new(),
             body: String::new(),
         }
+    }
+
+    #[test]
+    fn collaborator_files_dedupes_and_preserves_distance_order() {
+        let mut b = slice("chain-b", "B", None);
+        b.files = vec!["src/b.rs".to_owned(), "src/shared.rs".to_owned()];
+        let mut c = slice("chain-c", "C", None);
+        c.files = vec!["src/shared.rs".to_owned(), "src/c.rs".to_owned()];
+        let docs = vec![b, c];
+
+        // Literal (non-glob) files pass through expansion unchanged; the ctx repo root is unused here.
+        let ctx = Context::from_parts_for_test(
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo/.git"),
+            PathBuf::from("/repo/slices"),
+        );
+
+        // dependency_ids arrive in distance order (nearest first): chain-b, then chain-c.
+        let out =
+            super::collaborator_files(&ctx, &["chain-b".to_owned(), "chain-c".to_owned()], &docs);
+        assert_eq!(
+            out,
+            vec![
+                CollaboratorFile {
+                    slice_id: "chain-b".to_owned(),
+                    file: "src/b.rs".to_owned(),
+                },
+                // src/shared.rs is attributed to the NEARER slice (chain-b) and emitted once...
+                CollaboratorFile {
+                    slice_id: "chain-b".to_owned(),
+                    file: "src/shared.rs".to_owned(),
+                },
+                // ...so chain-c contributes only its non-duplicate file. No cap drops it.
+                CollaboratorFile {
+                    slice_id: "chain-c".to_owned(),
+                    file: "src/c.rs".to_owned(),
+                },
+            ]
+        );
+
+        // Empty blast radius → empty output (the caller turns this into an exit-0 empty list).
+        assert!(super::collaborator_files(&ctx, &[], &docs).is_empty());
+        // An unknown dependency id is skipped, not an error.
+        assert!(super::collaborator_files(&ctx, &["ghost".to_owned()], &docs).is_empty());
     }
 
     #[test]

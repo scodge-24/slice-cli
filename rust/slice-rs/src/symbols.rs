@@ -5,7 +5,9 @@
 //! surfaces, so the governing rule is **reject-on-ambiguity**: when the structure is not
 //! unmistakable — decorators, nested functions, multi-line signatures, tab indentation, braces
 //! inside strings/comments — return `None` rather than risk emitting a *wrong* span. A wrong span
-//! is worse than no span here. A future AST backend can replace this behind the same two functions.
+//! is worse than no span here. Under the `ast` Cargo feature the Tree-sitter backend in
+//! [`crate::symbols_ast`] dispatches in front of this for supported languages (it has none of these
+//! blind spots); this heuristic remains the always-available, zero-dep fallback.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
@@ -35,8 +37,22 @@ pub fn lang_for_path(path: &str) -> Option<Lang> {
 }
 
 /// The smallest definition whose body encloses 1-based `line`, or `None` when ambiguous/unfound.
+///
+/// Dispatches to the Tree-sitter AST backend when the `ast` feature is built and active (see
+/// [`crate::symbols_ast`]); otherwise the hand-rolled heuristic below. Same signature and contract
+/// either way — the backend only changes *which* spans resolve, never the interface.
 #[must_use]
 pub fn enclosing_span(content: &str, line: usize, lang: Lang) -> Option<Symbol> {
+    #[cfg(feature = "ast")]
+    if crate::symbols_ast::enabled() && crate::symbols_ast::supports(lang) {
+        return crate::symbols_ast::enclosing_span(content, line, lang);
+    }
+    enclosing_span_heuristic(content, line, lang)
+}
+
+/// Heuristic backend for [`enclosing_span`] (reject-on-ambiguity — see the module header).
+#[must_use]
+fn enclosing_span_heuristic(content: &str, line: usize, lang: Lang) -> Option<Symbol> {
     let lines: Vec<&str> = content.lines().collect();
     if line == 0 || line > lines.len() {
         return None;
@@ -48,9 +64,20 @@ pub fn enclosing_span(content: &str, line: usize, lang: Lang) -> Option<Symbol> 
 }
 
 /// The 1-based inclusive line range of the unique definition of `name`, or `None` when the name is
-/// not defined exactly once or the definition is ambiguous.
+/// not defined exactly once or the definition is ambiguous. Dispatches to the AST backend when the
+/// `ast` feature is active; otherwise the heuristic below.
 #[must_use]
 pub fn definition_span(content: &str, name: &str, lang: Lang) -> Option<(usize, usize)> {
+    #[cfg(feature = "ast")]
+    if crate::symbols_ast::enabled() && crate::symbols_ast::supports(lang) {
+        return crate::symbols_ast::definition_span(content, name, lang);
+    }
+    definition_span_heuristic(content, name, lang)
+}
+
+/// Heuristic backend for [`definition_span`].
+#[must_use]
+fn definition_span_heuristic(content: &str, name: &str, lang: Lang) -> Option<(usize, usize)> {
     let lines: Vec<&str> = content.lines().collect();
     let mut hit = None;
     for (i, raw) in lines.iter().enumerate() {
@@ -71,6 +98,57 @@ pub fn definition_span(content: &str, name: &str, lang: Lang) -> Option<(usize, 
         Lang::Brace => brace_span_from_def(&lines, d)?,
     };
     Some((sym.start, sym.end))
+}
+
+/// Enumerate every definition in `content` the heuristic can confidently span, in line order, plus
+/// the count of definition lines it had to **skip** (decorators, multi-line signatures, nested
+/// functions, tab indentation — the same reject-on-ambiguity cases the point queries refuse).
+///
+/// The skip count is not incidental: it is the **declared-coverage** signal. An outline that
+/// silently omits a decorated or multi-line def reads as complete when it isn't — worse than no
+/// outline. Callers MUST surface `(found.len(), found.len() + skipped)` so the consumer knows how
+/// much of the file went unrepresented. When declared coverage is too low to trust on real repos,
+/// that is itself the evidence that would gate an AST backend.
+///
+/// Dispatches to the AST backend when the `ast` feature is active, which spans every definition and
+/// so reports `skipped == 0` (full declared coverage). Otherwise the heuristic below, whose skip
+/// count is the honesty signal described above.
+#[must_use]
+pub fn enumerate_symbols(content: &str, lang: Lang) -> (Vec<Symbol>, usize) {
+    #[cfg(feature = "ast")]
+    if crate::symbols_ast::enabled()
+        && crate::symbols_ast::supports(lang)
+        && let Some(result) = crate::symbols_ast::enumerate_symbols(content, lang)
+    {
+        return result;
+    }
+    enumerate_symbols_heuristic(content, lang)
+}
+
+/// Heuristic backend for [`enumerate_symbols`].
+#[must_use]
+fn enumerate_symbols_heuristic(content: &str, lang: Lang) -> (Vec<Symbol>, usize) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut found = Vec::new();
+    let mut skipped = 0usize;
+    for (i, raw) in lines.iter().enumerate() {
+        let is_def = match lang {
+            Lang::Python => py_def_name(raw).is_some(),
+            Lang::Brace => brace_def_name(raw).is_some(),
+        };
+        if !is_def {
+            continue;
+        }
+        let span = match lang {
+            Lang::Python => py_span_from_def(&lines, i),
+            Lang::Brace => brace_span_from_def(&lines, i),
+        };
+        match span {
+            Some(sym) => found.push(sym),
+            None => skipped += 1,
+        }
+    }
+    (found, skipped)
 }
 
 // --- Python (indentation-based) -------------------------------------------------------------
@@ -290,7 +368,14 @@ fn brace_enclosing(lines: &[&str], target0: usize) -> Option<Symbol> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // These tests pin the *heuristic* backend's reject-on-ambiguity contract, so bind the public
+    // names to the heuristic impls directly — independent of whether the `ast` feature is built.
+    // The AST backend has its own tests in `symbols_ast.rs`.
+    use super::{
+        Lang, definition_span_heuristic as definition_span,
+        enclosing_span_heuristic as enclosing_span,
+        enumerate_symbols_heuristic as enumerate_symbols, lang_for_path,
+    };
 
     const PY: &str = "\
 def top(a, b):
@@ -404,5 +489,49 @@ class C:
         assert_eq!(lang_for_path("a/b/c.py"), Some(Lang::Python));
         assert_eq!(lang_for_path("src/main.rs"), Some(Lang::Brace));
         assert_eq!(lang_for_path("README.md"), None);
+    }
+
+    #[test]
+    fn enumerate_python_finds_top_level_and_methods() {
+        let (syms, skipped) = enumerate_symbols(PY, Lang::Python);
+        let got: Vec<(&str, usize, usize)> = syms
+            .iter()
+            .map(|s| (s.name.as_str(), s.start, s.end))
+            .collect();
+        // top (1-3), class C (6-8), method (7-8) — all confidently spanned, in line order.
+        assert_eq!(got, vec![("top", 1, 3), ("C", 6, 8), ("method", 7, 8)]);
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn enumerate_counts_unspannable_defs_as_skipped() {
+        // A decorated def cannot be spanned (the real start is ambiguous), so it counts toward the
+        // declared-coverage gap rather than silently vanishing: found={clean}, skipped={decorated}.
+        let src = "@deco\ndef decorated():\n    return 1\n\ndef clean():\n    return 2\n";
+        let (syms, skipped) = enumerate_symbols(src, Lang::Python);
+        assert_eq!(
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["clean"]
+        );
+        assert_eq!(skipped, 1); // declared coverage = 1/2
+    }
+
+    #[test]
+    fn enumerate_brace_orders_and_skips_kr_brace() {
+        // `spanned` (brace on the def line) is found; `kr` (K&R next-line brace) is unspannable.
+        let src = "fn spanned() {\n    work();\n}\n\nfn kr()\n{\n    work();\n}\n";
+        let (syms, skipped) = enumerate_symbols(src, Lang::Brace);
+        assert_eq!(
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["spanned"]
+        );
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn enumerate_empty_is_empty() {
+        let (syms, skipped) = enumerate_symbols("import os\nx = 1\n", Lang::Python);
+        assert!(syms.is_empty());
+        assert_eq!(skipped, 0);
     }
 }

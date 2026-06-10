@@ -419,13 +419,20 @@ fn grep_symbols_annotates_enclosing_span_opt_in() {
     let without = run_rust_raw(&["grep", "auth-service", "def verify_token"]);
     assert!(!stdout_text(&without).contains("[span"));
 
-    // A decorated def is ambiguous (api-handlers get_user is preceded by @require_auth) → left
-    // unannotated rather than mis-spanned.
+    // A decorated def (api-handlers get_user is preceded by @require_auth): the heuristic leaves it
+    // unannotated (ambiguous start) rather than mis-span it; the AST backend spans it confidently.
     let decorated = run_rust_raw(&["grep", "api-handlers", "def get_user", "--symbols"]);
     assert_eq!(decorated.0, 0);
+    #[cfg(not(feature = "ast"))]
     assert!(
         !stdout_text(&decorated).contains("[span"),
-        "decorated def must not be annotated: {}",
+        "decorated def must not be annotated (heuristic): {}",
+        stdout_text(&decorated)
+    );
+    #[cfg(feature = "ast")]
+    assert!(
+        stdout_text(&decorated).contains("[span get_user"),
+        "decorated def must be annotated under the AST backend: {}",
         stdout_text(&decorated)
     );
 
@@ -722,6 +729,212 @@ fn deps_reverse_transitive_walks_multiple_hops() {
         .collect::<Vec<_>>();
     deps.sort();
     assert_eq!(deps, vec!["chain-b".to_string(), "chain-c".to_string()]);
+}
+
+// Builds the chain-a → chain-b → chain-c fixture (each slice owns its own file, unambiguously) used
+// by the blast-radius tests.
+fn chain_fixture() -> TempDir {
+    let temp = fixture_repo();
+    let repo = temp.path();
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        std::fs::write(repo.join(format!("src/{name}.rs")), "// x\n").unwrap();
+    }
+    std::fs::write(
+        repo.join("slices/chain-a.md"),
+        "---\nslice_id: chain-a\ndescription: A\nfiles:\n  - src/chain_a.rs\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-b.md"),
+        "---\nslice_id: chain-b\ndescription: B\nfiles:\n  - src/chain_b.rs\ndependencies:\n  - chain-a\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/chain-c.md"),
+        "---\nslice_id: chain-c\ndescription: C\nfiles:\n  - src/chain_c.rs\ndependencies:\n  - chain-b\n---\n",
+    )
+    .unwrap();
+    temp
+}
+
+#[test]
+fn deps_files_lists_blast_radius_deduped_ordered_and_additive() {
+    let temp = chain_fixture();
+    let repo = temp.path();
+    // chain-c also owns chain-b's file, to exercise dedup across the transitive set (local to this
+    // test so the shared file doesn't make `context` queries ambiguous elsewhere).
+    std::fs::write(
+        repo.join("slices/chain-c.md"),
+        "---\nslice_id: chain-c\ndescription: C\nfiles:\n  - src/chain_b.rs\n  - src/chain_c.rs\ndependencies:\n  - chain-b\n---\n",
+    )
+    .unwrap();
+
+    // --files resolves the reverse-transitive blast radius to concrete files: nearest collaborator
+    // first (chain-b before chain-c), each file attributed to its slice, the shared src/chain_b.rs
+    // emitted once on the nearer slice (chain-b), and no cap drops chain-c's own file.
+    let out = run_rust_for_repo(
+        repo,
+        &[
+            "deps",
+            "chain-a",
+            "--reverse",
+            "--transitive",
+            "--files",
+            "--json",
+        ],
+    );
+    assert_eq!(out.0, 0);
+    assert_eq!(
+        out.1["files"],
+        json!([
+            {"slice_id": "chain-b", "file": "src/chain_b.rs"},
+            {"slice_id": "chain-c", "file": "src/chain_c.rs"},
+        ])
+    );
+
+    // Human output: file<TAB>slice_id (the file — the actionable read target — first), same order.
+    let human = run_rust_raw_for_repo(
+        repo,
+        &["deps", "chain-a", "--reverse", "--transitive", "--files"],
+    );
+    assert_eq!(human.0, 0);
+    assert_eq!(
+        stdout_text(&human),
+        "src/chain_b.rs\tchain-b\nsrc/chain_c.rs\tchain-c\n"
+    );
+
+    // Regression guard: WITHOUT --files the JSON is byte-identical to before — no `files` key.
+    let plain = run_rust_for_repo(
+        repo,
+        &["deps", "chain-a", "--reverse", "--transitive", "--json"],
+    );
+    assert!(
+        plain.1.get("files").is_none(),
+        "default deps JSON must not gain a files field; got {}",
+        plain.1
+    );
+
+    // A slice with no reverse-deps returns an empty list at exit 0, not an error.
+    let leaf = run_rust_for_repo(
+        repo,
+        &[
+            "deps",
+            "chain-c",
+            "--reverse",
+            "--transitive",
+            "--files",
+            "--json",
+        ],
+    );
+    assert_eq!(leaf.0, 0);
+    assert_eq!(leaf.1["dependencies"], json!([]));
+    assert_eq!(leaf.1["files"], json!([]));
+}
+
+#[test]
+fn deps_files_expands_glob_owned_files_to_concrete_paths() {
+    // A collaborator slice can declare its `files:` as a glob; `--files` must resolve it to the
+    // concrete matching files (the actionable read targets), never emit the raw pattern — which
+    // would also miscount the `depends-on:`/`blast-radius:` affordance.
+    let temp = fixture_repo();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("src/lib")).unwrap();
+    for name in ["one", "two"] {
+        std::fs::write(repo.join(format!("src/lib/{name}.rs")), "// x\n").unwrap();
+    }
+    std::fs::write(repo.join("src/root.rs"), "// x\n").unwrap();
+    std::fs::write(
+        repo.join("slices/globlib.md"),
+        "---\nslice_id: globlib\ndescription: Lib\nfiles:\n  - src/lib/*.rs\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("slices/globroot.md"),
+        "---\nslice_id: globroot\ndescription: Root\nfiles:\n  - src/root.rs\ndependencies:\n  - globlib\n---\n",
+    )
+    .unwrap();
+
+    let out = run_rust_for_repo(
+        repo,
+        &["deps", "globroot", "--transitive", "--files", "--json"],
+    );
+    assert_eq!(out.0, 0);
+    // The glob `src/lib/*.rs` resolves to its two concrete files (sorted), attributed to globlib —
+    // the raw pattern never appears in the output.
+    assert_eq!(
+        out.1["files"],
+        json!([
+            {"slice_id": "globlib", "file": "src/lib/one.rs"},
+            {"slice_id": "globlib", "file": "src/lib/two.rs"},
+        ])
+    );
+}
+
+#[test]
+fn context_human_advertises_both_dependency_directions_but_json_is_unchanged() {
+    let temp = chain_fixture();
+    let repo = temp.path();
+
+    // chain-a is the dependency ROOT (depends on nothing) but has the widest blast radius. Its
+    // context advertises the reverse direction (blast-radius) and omits the forward one (depends-on).
+    let root = run_rust_raw_for_repo(repo, &["context", "src/chain_a.rs"]);
+    assert_eq!(root.0, 0);
+    assert!(
+        stdout_text(&root).contains(
+            "blast-radius: 2 files in 2 reverse-dep slices — slice deps chain-a --reverse --transitive --files"
+        ),
+        "root slice should advertise its blast radius; got:\n{}",
+        stdout_text(&root)
+    );
+    assert!(
+        !stdout_text(&root).contains("depends-on:"),
+        "no depends-on line when the forward deps are empty (chain-a is the root)"
+    );
+
+    // chain-c is the dependency TIP (nothing depends on it) but relies on the whole chain. Its
+    // context advertises the forward direction (depends-on) and omits the reverse one (blast-radius).
+    // This is the direction the xarray-2905 confound needed: distributed gold living in a forward dep.
+    let tip = run_rust_raw_for_repo(repo, &["context", "src/chain_c.rs"]);
+    assert_eq!(tip.0, 0);
+    assert!(
+        stdout_text(&tip).contains(
+            "depends-on: 2 files in 2 slices this relies on — slice deps chain-c --transitive --files"
+        ),
+        "tip slice should advertise its forward dependencies; got:\n{}",
+        stdout_text(&tip)
+    );
+    assert!(
+        !stdout_text(&tip).contains("blast-radius:"),
+        "no blast-radius line when the reverse deps are empty (chain-c is the tip)"
+    );
+
+    // The JSON contract is unchanged — neither affordance line leaks into ContextOutput.
+    let machine = run_rust_for_repo(repo, &["context", "src/chain_a.rs", "--json"]);
+    assert_eq!(machine.0, 0);
+    let machine_txt = machine.1.to_string();
+    assert!(
+        !machine_txt.contains("blast-radius") && !machine_txt.contains("depends-on"),
+        "context JSON must stay byte-identical"
+    );
+
+    // chain-b sits in the middle: exactly one forward dep (chain-a) and one reverse dep (chain-c),
+    // so it exercises BOTH lines and singular grammar in a single context call.
+    let mid = run_rust_raw_for_repo(repo, &["context", "src/chain_b.rs"]);
+    assert_eq!(mid.0, 0);
+    assert!(
+        stdout_text(&mid).contains(
+            "depends-on: 1 file in 1 slice this relies on — slice deps chain-b --transitive --files"
+        ),
+        "singular forward affordance for a one-file, one-slice dependency; got:\n{}",
+        stdout_text(&mid)
+    );
+    assert!(
+        stdout_text(&mid).contains(
+            "blast-radius: 1 file in 1 reverse-dep slice — slice deps chain-b --reverse --transitive --files"
+        ),
+        "singular reverse affordance for a one-file, one-slice radius; got:\n{}",
+        stdout_text(&mid)
+    );
 }
 
 #[test]
@@ -1804,4 +2017,127 @@ fn show_omits_overview_when_slice_has_no_lede() {
         value["overview"], "",
         "overview json field is empty when there is no lede"
     );
+}
+
+// Fixture for the symbol-orientation surfaces (Stage 2): one file with a confidently-spannable
+// top-level def, a class + method, and a decorated def the heuristic must skip (exercising declared
+// coverage), plus a second file so `symbols <slice>` aggregates across files.
+fn symbols_fixture() -> TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/mod.py"),
+        "def top():\n    return 1\n\n\nclass C:\n    def method(self):\n        return 2\n\n\n@deco\ndef decorated():\n    return 3\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/other.py"), "def helper():\n    return 0\n").unwrap();
+    std::fs::create_dir_all(repo.join("slices")).unwrap();
+    std::fs::write(
+        repo.join("slices/m.md"),
+        "---\nslice_id: m\ndescription: M\nfiles:\n  - src/mod.py\n  - src/other.py\n---\n",
+    )
+    .unwrap();
+    run_git(repo, &["init"]);
+    temp
+}
+
+#[test]
+fn outline_anchors_symbols_and_declares_coverage() {
+    let temp = symbols_fixture();
+    let repo = temp.path();
+
+    // Human: file:start-end<TAB>name per confidently-spanned def, in line order, then the mandatory
+    // declared-coverage line. The decorated def is skipped (4 detected, 3 spanned) — surfaced as 3/4,
+    // never silently dropped.
+    let human = run_rust_raw_for_repo(repo, &["outline", "src/mod.py"]);
+    assert_eq!(human.0, 0);
+    #[cfg(not(feature = "ast"))]
+    assert_eq!(
+        stdout_text(&human),
+        "src/mod.py:1-2\ttop\nsrc/mod.py:5-7\tC\nsrc/mod.py:6-7\tmethod\ncoverage: 3/4 definitions spanned\n"
+    );
+    // Under the AST backend the decorated def is spanned too (decorators included, lines 10-12) →
+    // full declared coverage.
+    #[cfg(feature = "ast")]
+    assert_eq!(
+        stdout_text(&human),
+        "src/mod.py:1-2\ttop\nsrc/mod.py:5-7\tC\nsrc/mod.py:6-7\tmethod\nsrc/mod.py:10-12\tdecorated\ncoverage: 4/4 definitions spanned\n"
+    );
+
+    // JSON carries the same rows + the spanned/total counts.
+    let (status, value) = run_rust_for_repo(repo, &["outline", "src/mod.py", "--json"]);
+    assert_eq!(status, 0);
+    assert_eq!(value["selector"], "src/mod.py");
+    #[cfg(not(feature = "ast"))]
+    {
+        assert_eq!(value["spanned"], 3);
+        assert_eq!(value["total"], 4);
+        assert_eq!(
+            value["symbols"],
+            json!([
+                {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
+                {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
+                {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
+            ])
+        );
+    }
+    #[cfg(feature = "ast")]
+    {
+        assert_eq!(value["spanned"], 4);
+        assert_eq!(value["total"], 4);
+        assert_eq!(
+            value["symbols"],
+            json!([
+                {"file": "src/mod.py", "name": "top", "start": 1, "end": 2},
+                {"file": "src/mod.py", "name": "C", "start": 5, "end": 7},
+                {"file": "src/mod.py", "name": "method", "start": 6, "end": 7},
+                {"file": "src/mod.py", "name": "decorated", "start": 10, "end": 12},
+            ])
+        );
+    }
+
+    // An unsupported file type is a soft exit 1 with a stderr note, not a crash or a false "0/0".
+    let md = run_rust_raw_for_repo(repo, &["outline", "slices/m.md"]);
+    assert_eq!(md.0, 1);
+    assert!(stderr_text(&md).contains("unsupported file type"));
+}
+
+#[test]
+fn symbols_aggregates_declared_coverage_across_slice_files() {
+    let temp = symbols_fixture();
+    let repo = temp.path();
+
+    // `symbols <slice>` unions every file the slice owns: mod.py (top, C, method) + other.py (helper),
+    // with coverage aggregated over the slice (4 spanned of 5 detected — the decorated def skipped).
+    let human = run_rust_raw_for_repo(repo, &["symbols", "m"]);
+    assert_eq!(human.0, 0);
+    let text = stdout_text(&human);
+    assert!(text.contains("src/mod.py:1-2\ttop"), "got:\n{text}");
+    assert!(text.contains("src/other.py:1-2\thelper"), "got:\n{text}");
+    #[cfg(not(feature = "ast"))]
+    assert!(
+        text.contains("coverage: 4/5 definitions spanned"),
+        "aggregate declared coverage across the slice; got:\n{text}"
+    );
+    // The AST backend spans the decorated def too → full coverage across the slice.
+    #[cfg(feature = "ast")]
+    assert!(
+        text.contains("coverage: 5/5 definitions spanned"),
+        "AST backend spans every def across the slice; got:\n{text}"
+    );
+
+    let (status, value) = run_rust_for_repo(repo, &["symbols", "m", "--json"]);
+    assert_eq!(status, 0);
+    assert_eq!(value["selector"], "m");
+    #[cfg(not(feature = "ast"))]
+    {
+        assert_eq!(value["spanned"], 4);
+        assert_eq!(value["total"], 5);
+    }
+    #[cfg(feature = "ast")]
+    {
+        assert_eq!(value["spanned"], 5);
+        assert_eq!(value["total"], 5);
+    }
 }

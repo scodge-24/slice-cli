@@ -81,6 +81,10 @@ cargo install --path rust/slice-rs        # installs the `slice` binary
 Requires `git` on PATH at runtime. `slice browse` additionally needs optional `fzf`
 (>= 0.30). **Python/PyPI is not a supported install path** — `slice` is a Rust binary.
 
+Opt-in build features: `--features semantic` adds `locate` / `find --semantic` /
+`semantic-index` (needs `OPENROUTER_API_KEY` at runtime); `--features ast` swaps the
+heuristic symbol spanner for full Tree-sitter spans in `outline`/`symbols`.
+
 Smoke check:
 
 ```bash
@@ -109,6 +113,15 @@ slice stamp --all           # record baseline fingerprints once the mappings loo
 - resolves a relative docs dir against the repo root, so `slice --repo <r> docs-bootstrap docs`
   works from anywhere.
 
+With a `semantic` build, also build the embedding index `slice locate` queries
+(slice-owned, regenerable state under `slices/`):
+
+```bash
+export OPENROUTER_API_KEY=...       # embeddings; the key is never written to disk
+slice semantic-index --units code   # rebuild after reslicing (slices changed = index stale)
+slice locate "describe a behaviour"   # smoke check
+```
+
 ---
 
 ## 3. Optional: agent instructions
@@ -132,6 +145,9 @@ Navigate:
 - `slice deps <id> --reverse --transitive` - blast radius: every slice that
   (transitively) depends on this one, before you change it.
 - `slice find <needle>` - locate a concept or abstraction across slices.
+- `slice locate "<behaviour described in words>"` - (semantic builds) one-call discovery
+  for code you can describe but not name: read-ready `file:line` anchors + a cross-check
+  when the slice cards point elsewhere. Read its anchors before other navigation.
 
 Track doc staleness:
 

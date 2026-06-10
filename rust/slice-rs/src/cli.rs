@@ -60,6 +60,27 @@ enum Command {
         json: bool,
     },
 
+    /// Outline a file's symbols (definitions + line spans).
+    #[command(
+        after_help = "Each row is file:start-end\\tname; the trailing `coverage: N/M definitions \
+                      spanned` declares how many detected definitions the heuristic could confidently \
+                      span — ambiguous cases (decorators, nested functions, multi-line signatures, \
+                      tab indent) are skipped, not guessed, so a low ratio is a real signal, not noise."
+    )]
+    Outline {
+        /// Source file to outline (any tracked file; slice membership not required).
+        file: String,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the symbols defined across a slice's files (with declared coverage).
+    Symbols {
+        selector: String,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show slice dependencies.
     Deps {
         selector: String,
@@ -67,6 +88,9 @@ enum Command {
         reverse: bool,
         #[arg(long)]
         transitive: bool,
+        /// List the concrete files of the dependency slices (the blast radius), not just slice ids.
+        #[arg(long)]
+        files: bool,
         #[arg(long)]
         json: bool,
     },
@@ -101,10 +125,21 @@ enum Command {
     },
 
     /// Search slices by keyword.
+    ///
+    /// With --semantic (requires the `semantic` build feature + a built index), ranks slices by
+    /// embedding similarity instead of keyword match — for concepts you can't name by symbol.
     Find {
         needle: String,
         #[arg(long)]
         json: bool,
+        /// Semantic (embedding) search over the slice index instead of keyword match.
+        #[cfg(feature = "semantic")]
+        #[arg(long)]
+        semantic: bool,
+        /// Which embedding index to query: cards | code | code-sliceaug.
+        #[cfg(feature = "semantic")]
+        #[arg(long, value_enum, default_value = "cards")]
+        units: crate::semantic::UnitMode,
     },
 
     /// Fuzzy-pick a slice with fzf (interactive).
@@ -207,6 +242,43 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Locate code by meaning — the composite discovery path, in one call.
+    ///
+    /// For a need DESCRIBED in natural language (no symbol names required): embeds the query
+    /// against the code semantic index, returns the top hits as read-ready `file:line` anchors
+    /// with snippets, and cross-checks them against the slice-card description match — flagging
+    /// when the cards point at a different area than the embedding hits (embeddings fail
+    /// confidently, not hesitantly). Requires the `semantic` build feature and a code index
+    /// (`slice semantic-index --units code`).
+    #[cfg(feature = "semantic")]
+    Locate {
+        /// The need, described in natural language.
+        query: String,
+        /// Number of hits to return.
+        #[arg(long, default_value_t = 3)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Build the semantic embedding index over slice-anchored units (writes slices/SEMANTIC.json).
+    ///
+    /// Requires the `semantic` build feature and an `OPENROUTER_API_KEY`. The index is slice-owned,
+    /// regenerable state; rebuild it after slices change.
+    #[cfg(feature = "semantic")]
+    SemanticIndex {
+        /// Embedding model (default: google/gemini-embedding-2).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding dimensions (default: 512; only models supporting reduction honour it).
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Which units to embed: cards (description + abstractions) | code (symbol bodies) |
+        /// code-sliceaug (symbol bodies prepended with owning-slice context).
+        #[arg(long, value_enum, default_value = "cards")]
+        units: crate::semantic::UnitMode,
+    },
 }
 
 pub fn run() -> anyhow::Result<i32> {
@@ -254,12 +326,15 @@ fn run_inner(args: Args) -> Result<i32> {
             commands::show(&ctx, &selector, mode, json, &styles)
         }
         Command::Files { selector, json } => commands::files(&ctx, &selector, json),
+        Command::Outline { file, json } => commands::outline(&ctx, &file, json),
+        Command::Symbols { selector, json } => commands::symbols(&ctx, &selector, json),
         Command::Deps {
             selector,
             reverse,
             transitive,
+            files,
             json,
-        } => commands::deps(&ctx, &selector, reverse, transitive, json),
+        } => commands::deps(&ctx, &selector, reverse, transitive, files, json),
         Command::ForPath { path, json } => commands::for_path(&ctx, &path, json),
         Command::AffectedDocs { paths, json } => commands::affected_docs(&ctx, &paths, json),
         Command::Context {
@@ -268,7 +343,20 @@ fn run_inner(args: Args) -> Result<i32> {
             best_effort,
             json,
         } => commands::context(&ctx, &selector, strict, best_effort, json),
-        Command::Find { needle, json } => commands::find(&ctx, &needle, json, &styles),
+        Command::Find {
+            needle,
+            json,
+            #[cfg(feature = "semantic")]
+            semantic,
+            #[cfg(feature = "semantic")]
+            units,
+        } => {
+            #[cfg(feature = "semantic")]
+            if semantic {
+                return crate::semantic::query(&ctx, &needle, json, &styles, units);
+            }
+            commands::find(&ctx, &needle, json, &styles)
+        }
         Command::Browse { query, print } => {
             commands::browse(&ctx, query.as_deref(), print, &styles, color)
         }
@@ -351,5 +439,15 @@ fn run_inner(args: Args) -> Result<i32> {
             dry_run,
             force,
         } => commands::docs_bootstrap(&ctx, &docs_dir, dry_run, force),
+        #[cfg(feature = "semantic")]
+        Command::Locate { query, top, json } => {
+            crate::semantic::locate(&ctx, &query, json, &styles, top)
+        }
+        #[cfg(feature = "semantic")]
+        Command::SemanticIndex {
+            model,
+            dimensions,
+            units,
+        } => crate::semantic::build_index(&ctx, model, dimensions, units),
     }
 }

@@ -43,6 +43,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidInput(String),
 
+    #[cfg(feature = "semantic")]
+    #[error("embedding backend: {0}")]
+    Embedding(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

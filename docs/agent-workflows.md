@@ -25,8 +25,15 @@ slice context src/auth/middleware.py
 
 Returns: owning slice, files, dependencies, linked docs with stale/current status
 (when `DOCS.yaml` exists), then the standard body sections — `System Behavior`,
-`Invariants`, `Runtime Flows`, `Verification`, `Update Triggers`. Add `--json` for
-a stable `{"slices": [...]}` payload.
+`Invariants`, `Runtime Flows`, `Verification`, `Update Triggers`. The human output also
+carries up to two one-line dependency affordances, each printed only when that direction is
+non-empty: `depends-on:` — how many files in the slices this one relies on, with the
+`slice deps … --transitive --files` command that lists them (forward deps, often where
+distributed collaborators live); and `blast-radius:` — how many collaborator files depend on
+this slice, with the `slice deps … --reverse --transitive --files` command (reverse deps /
+change impact). Either way you pull the relevant files into context before editing instead of
+grepping for them. Add `--json` for a stable `{"slices": [...]}` payload (these hints are
+human-output only; the JSON contract is unchanged).
 
 Ambiguous ownership (a file owned by more than one slice) follows
 `slices/config.yaml` → `context.ambiguity` (`strict` default fails and lists the
@@ -220,7 +227,9 @@ repo-setup runbook (install, agent bootstrap, optional CI/hook/agent integration
 
 | Command | Purpose |
 |---|---|
-| `slice find <needle>` | Search slice metadata + manifest tags |
+| `slice find <needle>` | Search slice metadata + manifest tags (keyword, all terms must match) |
+| `slice grep <slice> <pattern> --symbols` | Exact search scoped to one slice's files, hits tagged with their enclosing definition |
+| `slice locate "<behaviour>"` | (`semantic` builds) Behaviour you can describe but not name → read-ready `file:line` anchors + a card-match cross-check. Read its anchors before other navigation. |
 
 ## Headless vs Interactive
 

@@ -12,7 +12,11 @@ pub mod index;
 pub mod manifest;
 pub mod models;
 pub mod paths;
+#[cfg(feature = "semantic")]
+pub mod semantic;
 pub mod slices;
 pub mod symbols;
+#[cfg(feature = "ast")]
+pub mod symbols_ast;
 
 pub use error::{Error, Result};

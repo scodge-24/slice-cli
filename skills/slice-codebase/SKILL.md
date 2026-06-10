@@ -118,9 +118,9 @@ Wait for ALL refine agents to complete before Phase 3.
    ```
 
 4. **Build the semantic index** — so `slice locate` and `slice find --semantic` work on this
-   repo from the start (without it, those commands exit 1 with a "run `slice semantic-index`
-   first" hint). This is also the rebuild after a re-slice: freshly written cards make any
-   existing index stale.
+   repo from the start (without it, those commands exit 1 with a "no code semantic index; run
+   `slice semantic-index --units code` first" hint). This is also the rebuild after a re-slice:
+   freshly written cards make any existing index stale.
    ```
    slice semantic-index --units code
    ```
@@ -156,8 +156,10 @@ Filter the changed file list to files within the hinted paths before passing to 
    ```
 4. Run `slice check` to validate. Fix any errors before finishing.
 5. If `slices/SEMANTIC*.json` exists, the embedding index is now stale (its units carry
-   per-slice fingerprints): rebuild with `slice semantic-index --units code` when the
-   installed binary has the `semantic` feature, otherwise tell the user it needs a rebuild.
+   per-slice fingerprints): rebuild with `slice semantic-index --units code` when the installed
+   binary has the `semantic` feature **and** `OPENROUTER_API_KEY` is set; if either is missing,
+   tell the user it needs a rebuild rather than running the command (a keyless run would fail
+   with an API error, not a clean message).
 
 The refine phase is skipped for diff updates — directory-level changes only.
 

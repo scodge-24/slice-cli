@@ -95,7 +95,7 @@ slice --repo examples/mock-repo list
 
 ## 2. Add slice state to a repo
 
-Generate slice cards under `slices/` with the `/slice-codebase` skill (see §7) or write
+Generate slice cards under `slices/` with the `/slice-codebase` skill (see §6) or write
 them by hand. Then, optionally, set up design-doc staleness tracking:
 
 ```bash
@@ -113,7 +113,7 @@ slice stamp --all           # record baseline fingerprints once the mappings loo
 - resolves a relative docs dir against the repo root, so `slice --repo <r> docs-bootstrap docs`
   works from anywhere.
 
-With a `semantic` build, build the embedding index `slice locate` queries (slice-owned,
+With a `semantic` build, build the embedding index that `slice locate` queries (slice-owned,
 regenerable state under `slices/`). The `/slice-codebase` skill builds this as its final
 step (see §6), so on a `semantic` build with the key set you get an index for free; build or
 rebuild it by hand any time slices change:

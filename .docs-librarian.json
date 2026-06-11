@@ -1,0 +1,5 @@
+{
+  "schema": "librarian.config.v1",
+  "ignore": ["examples/", "design/"],
+  "rules": { "slice-cards": "WARN" }
+}

@@ -483,7 +483,11 @@ pub(crate) fn normalize_abstraction(raw: &str) -> String {
 }
 
 fn frontmatter_doc_id(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    // Normalise CRLF -> LF so Windows-authored docs (e.g. an Obsidian vault on
+    // a Windows filesystem) parse identically to LF docs; otherwise a leading
+    // `---\r\n` defeats the `---\n` delimiter match below and the doc_id is
+    // reported missing even though it is present.
+    let text = std::fs::read_to_string(path).ok()?.replace("\r\n", "\n");
     let frontmatter = text
         .strip_prefix("---\n")
         .and_then(|rest| rest.find("\n---").map(|end| &rest[..end]))?;
